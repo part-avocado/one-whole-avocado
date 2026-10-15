@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:?run ./deploy.sh so the commit is baked in}
         GIT_MESSAGE: ${GIT_MESSAGE:-}
     container_name: one-whole-avocado
     env_file: .env

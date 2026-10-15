@@ -332,7 +332,11 @@ console.log("socket mode is running!");
 // restarts/crash loops of the same commit don't repeat the announcement.
 const announceDeploy = async () => {
   const { version, commit, commitMessage, dirty } = deployInfo;
-  if (process.env.NODE_ENV !== "production" || commit === "unknown" || dirty) return;
+  if (process.env.NODE_ENV !== "production" || dirty) return;
+  if (commit === "unknown") {
+    app.logger.warn("deploy announcement skipped: commit unknown (deploy with ./deploy.sh)");
+    return;
+  }
   const { messages } = await app.client.conversations.history({
     token: process.env.SLACK_BOT_TOKEN,
     channel: TARGET_CHANNEL,
