@@ -1,7 +1,7 @@
 import "dotenv/config";
 import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
-import { gatherBuild, trackErrors } from "./build.js";
+import { gatherBuild, trackErrors, deployInfo } from "./build.js";
 
 const { App, LogLevel } = bolt;
 
@@ -327,3 +327,24 @@ app.action("pinggroup_no", async ({ ack, body, action, respond }) => {
 
 await app.start();
 console.log("socket mode is running!");
+
+// Announce new deploys in the private channel. The commit is stored in message metadata so
+// restarts/crash loops of the same commit don't repeat the announcement.
+const announceDeploy = async () => {
+  const { version, commit, commitMessage, dirty } = deployInfo;
+  if (process.env.NODE_ENV !== "production" || commit === "unknown" || dirty) return;
+  const { messages } = await app.client.conversations.history({
+    token: process.env.SLACK_BOT_TOKEN,
+    channel: TARGET_CHANNEL,
+    limit: 50,
+    include_all_metadata: true,
+  });
+  if (messages.some((m) => m.metadata?.event_type === "deploy" && m.metadata.event_payload?.commit === commit)) return;
+  await app.client.chat.postMessage({
+    token: process.env.SLACK_BOT_TOKEN,
+    channel: TARGET_CHANNEL,
+    text: `new version deployed: ${version}\n${escapeMrkdwn(commitMessage || commit)}`,
+    metadata: { event_type: "deploy", event_payload: { commit } },
+  });
+};
+announceDeploy().catch((err) => app.logger.error(err));

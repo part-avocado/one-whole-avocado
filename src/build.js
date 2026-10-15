@@ -23,6 +23,7 @@ const git = (...args) => {
 
 // .git isn't shipped in the Docker image, so fall back to a build-time GIT_COMMIT.
 const commit = git("rev-parse", "--short", "HEAD") ?? process.env.GIT_COMMIT?.slice(0, 7) ?? "unknown";
+const commitMessage = (git("log", "-1", "--format=%B") ?? process.env.GIT_MESSAGE ?? "").trim();
 const dirty = git("status", "--porcelain") ? " (dirty)" : "";
 const branch = git("rev-parse", "--abbrev-ref", "HEAD");
 
@@ -63,6 +64,8 @@ export const trackErrors = (logger) => {
     process.exit(1);
   });
 };
+
+export const deployInfo = { version: `v${pkg.version}`, commit, commitMessage, dirty: Boolean(dirty) };
 
 export function gatherBuild() {
   const rows = [
