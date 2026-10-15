@@ -48,6 +48,7 @@
             "bot_events": [
                 "app_home_opened",
                 "member_joined_channel",
+                "member_left_channel",
                 "message.channels",
                 "message.groups"
             ]

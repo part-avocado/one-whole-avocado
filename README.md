@@ -6,6 +6,8 @@ A Slack bouncer bot (Bolt for JS, Socket Mode).
 2. The bot DMs `U0A06EPFV45` with the user's ID, a ping, the reason, and Approve / Reject buttons.
 3. **Approve** adds the user to `C0C962U4JSW`. **Reject** does nothing visible to the user.
 
+4. If a user leaves `C0C26M2E3FT`, the bot also removes them from `C0C962U4JSW`.
+
 Only `U0A06EPFV45` can act on the buttons. IDs are constants at the top of `src/app.js`.
 
 ## Setup

@@ -225,6 +225,25 @@ app.event("member_joined_channel", async ({ event, client }) => {
   });
 });
 
+app.event("member_left_channel", async ({ event, client }) => {
+  if (event.channel !== REQUEST_CHANNEL) return;
+  botUserId ??= (await client.auth.test()).user_id;
+  if (event.user === botUserId) return;
+
+  try {
+    await client.conversations.kick({ channel: TARGET_CHANNEL, user: event.user });
+  } catch (err) {
+    if (err.data?.error === "not_in_channel") return;
+    app.logger.error(err);
+    await client.chat
+      .postMessage({
+        channel: (await client.conversations.open({ users: APPROVER })).channel.id,
+        text: `:warning: <@${event.user}> left <#${REQUEST_CHANNEL}> but I couldn't remove them from <#${TARGET_CHANNEL}> (\`${err.data?.error ?? err.message}\`). Please remove them manually.`,
+      })
+      .catch(() => {});
+  }
+});
+
 const ownButton = (body, action) => body.user.id === action.value;
 
 app.action("rules_agree", async ({ ack, body, action, respond }) => {
