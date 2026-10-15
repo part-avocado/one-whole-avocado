@@ -1,6 +1,7 @@
 import "dotenv/config";
 import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
+import { gatherBuild, trackErrors } from "./build.js";
 
 const { App, LogLevel } = bolt;
 
@@ -18,6 +19,8 @@ const app = new App({
   socketMode: true,
   logLevel: LogLevel.INFO,
 });
+
+trackErrors(app.logger);
 
 const escapeMrkdwn = (s) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -153,9 +156,9 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
 app.action("approve_request", decide(true));
 app.action("reject_request", decide(false));
 
-// ---- ?ping / ?info (any channel the bot is in) ----
+// ---- ?ping / ?info / ?build (any channel the bot is in) ----
 
-app.message(/^\?(ping|info)\s*$/i, async ({ message, context, client, say }) => {
+app.message(/^\?(ping|info|build)\s*$/i, async ({ message, context, client, say }) => {
   if (message.subtype || message.bot_id) return;
   const cmd = context.matches[1].toLowerCase();
   const thread_ts = message.thread_ts;
@@ -171,6 +174,8 @@ app.message(/^\?(ping|info)\s*$/i, async ({ message, context, client, say }) => 
       text: `:partavocado-approve: Pong! Slack API RT Delay: *${api} ms* @ event delivery: *${Math.round(eventLag)} ms*`,
     });
   }
+
+  if (cmd === "build") return say({ thread_ts, text: "```\n" + gatherBuild() + "\n```" });
 
   const info = await gatherInfo();
   return say({ thread_ts, text: "```\n" + info + "\n```" });

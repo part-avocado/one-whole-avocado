@@ -30,3 +30,11 @@ docker compose logs -f
 ```
 
 `restart: unless-stopped` brings the bot back after crashes and VM reboots.
+
+## Chat commands
+
+Send these as a plain message in any channel the bot is in (optionally in a thread):
+
+- `?ping` — Slack API round-trip and event delivery latency.
+- `?info` — host / container / runtime details.
+- `?build` — version, git commit, start time, uptime, Node/Bolt versions, and error count with the last few errors. In Docker the commit comes from `GIT_COMMIT` (`GIT_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`).

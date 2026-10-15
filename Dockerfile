@@ -1,6 +1,7 @@
 FROM node:22-alpine
 
-ENV NODE_ENV=production
+ARG GIT_COMMIT=unknown
+ENV NODE_ENV=production GIT_COMMIT=$GIT_COMMIT
 WORKDIR /app
 
 COPY package.json package-lock.json ./

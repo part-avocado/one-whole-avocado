@@ -1,6 +1,9 @@
 services:
   avocado:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: one-whole-avocado
     env_file: .env
     restart: unless-stopped
