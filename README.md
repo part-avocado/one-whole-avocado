@@ -1,0 +1,18 @@
+# one whole avocado
+
+A Slack bouncer bot (Bolt for JS, Socket Mode).
+
+1. A user runs `/channelrequest <reason>` in `C0C26M2E3FT` (anywhere else it refuses).
+2. The bot DMs `U0A06EPFV45` with the user's ID, a ping, the reason, and Approve / Reject buttons.
+3. **Approve** adds the user to `C0C962U4JSW`. **Reject** does nothing visible to the user.
+
+Only `U0A06EPFV45` can act on the buttons. IDs are constants at the top of `src/app.js`.
+
+## Setup
+
+1. https://api.slack.com/apps → **Create New App** → **From a manifest**, paste `manifest.json`.
+2. **Install App**, copy the Bot User OAuth Token (`xoxb-…`).
+3. **Basic Information → App-Level Tokens** → generate one with `connections:write` (`xapp-…`).
+4. `cp .env.example .env`, fill in both tokens.
+5. **Invite the bot to `C0C962U4JSW`** (`/invite @one whole avocado`) — it can't add people to a channel it isn't in.
+6. `npm install && npm start`
