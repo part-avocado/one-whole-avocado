@@ -9,6 +9,7 @@ const TARGET_CHANNEL = "C0C962U4JSW";
 const APPROVER = "U0A06EPFV45";
 const PING_GROUP_ID = "S0C9DFYS90T";
 const PING_GROUP_HANDLE = "cutavocados";
+const NDA_API = "https://nda.hackclub.com/api/v1/nda_status";
 const RULES_URL = "https://hackclub.enterprise.slack.com/docs/T0266FRGM/F0C9ML51CTB";
 
 const app = new App({
@@ -21,7 +22,7 @@ const app = new App({
 const escapeMrkdwn = (s) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-const requestBlocks = (userId, reason, footer) => [
+const requestBlocks = (userId, reason, footer, ndaUnverified) => [
   {
     type: "section",
     text: {
@@ -30,6 +31,7 @@ const requestBlocks = (userId, reason, footer) => [
         `:door: *Channel access request*\n` +
         `*User:* <@${userId}> (\`${userId}\`)\n` +
         `*Ping:* <@${userId}>\n` +
+        (ndaUnverified ? `:warning: *NDA status could not be verified* — please check manually.\n` : "") +
         `*Reason:*\n>${escapeMrkdwn(reason).replace(/\n/g, "\n>")}`,
     },
   },
@@ -43,18 +45,25 @@ const requestBlocks = (userId, reason, footer) => [
             action_id: "approve_request",
             text: { type: "plain_text", text: "Approve" },
             style: "primary",
-            value: JSON.stringify({ userId, reason }),
+            value: JSON.stringify({ userId, reason, ndaUnverified }),
           },
           {
             type: "button",
             action_id: "reject_request",
             text: { type: "plain_text", text: "Reject" },
             style: "danger",
-            value: JSON.stringify({ userId, reason }),
+            value: JSON.stringify({ userId, reason, ndaUnverified }),
           },
         ],
       },
 ];
+
+// Legacy signatures are valid agreements, so any "signed" status passes.
+const hasSignedNda = async (slackId) => {
+  const res = await fetch(`${NDA_API}/${encodeURIComponent(slackId)}`);
+  if (!res.ok) throw new Error(`NDA API returned ${res.status}`);
+  return (await res.json()).status === "signed";
+};
 
 app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   await ack();
@@ -74,12 +83,26 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
     });
   }
 
+  let ndaUnverified = false;
+  try {
+    if (!(await hasSignedNda(command.user_id))) {
+      return respond({
+        response_type: "ephemeral",
+        text: "woah! you need an NDA to do that...",
+      });
+    }
+  } catch (err) {
+    // Fail open: the approver makes the final call, so flag it instead of blocking.
+    app.logger.error(err);
+    ndaUnverified = true;
+  }
+
   try {
     const { channel } = await client.conversations.open({ users: APPROVER });
     await client.chat.postMessage({
       channel: channel.id,
       text: `Channel access request from <@${command.user_id}>`,
-      blocks: requestBlocks(command.user_id, reason),
+      blocks: requestBlocks(command.user_id, reason, undefined, ndaUnverified),
     });
   } catch (err) {
     app.logger.error(err);
@@ -100,7 +123,7 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
 
   if (body.user.id !== APPROVER) return;
 
-  const { userId, reason } = JSON.parse(action.value);
+  const { userId, reason, ndaUnverified } = JSON.parse(action.value);
   let footer;
 
   if (approved) {
@@ -123,7 +146,7 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
     channel: body.channel.id,
     ts: body.message.ts,
     text: footer,
-    blocks: requestBlocks(userId, reason, footer),
+    blocks: requestBlocks(userId, reason, footer, ndaUnverified),
   });
 };
 
@@ -145,7 +168,7 @@ app.message(/^\?(ping|info)\s*$/i, async ({ message, context, client, say }) => 
     const api = Math.round(performance.now() - t0);
     return say({
       thread_ts,
-      text: `:partavocado_approve: Pong! Slack API RT Delay: *${api} ms* @ event delivery: *${Math.round(eventLag)} ms*`,
+      text: `:partavocado-approve: Pong! Slack API RT Delay: *${api} ms* @ event delivery: *${Math.round(eventLag)} ms*`,
     });
   }
 
@@ -279,7 +302,7 @@ app.action("pinggroup_yes", async ({ ack, body, action, client, respond }) => {
   let text;
   try {
     await addToGroup(client, action.value);
-    text = `:partavocado_approve: You've been added to @${PING_GROUP_HANDLE}.`;
+    text = `:partavocado-approve: You've been added to @${PING_GROUP_HANDLE}.`;
   } catch (err) {
     app.logger.error(err);
     text = `:warning: Couldn't add you to @${PING_GROUP_HANDLE} (\`${err.data?.error ?? err.message}\`).`;
