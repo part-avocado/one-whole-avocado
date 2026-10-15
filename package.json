@@ -1,6 +1,6 @@
 {
   "name": "one-full-avocado",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A Slack bot called one whole avocado",
   "main": "src/app.js",
   "type": "module",

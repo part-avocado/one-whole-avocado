@@ -24,7 +24,7 @@ Socket Mode makes only outbound connections, so no ports are exposed.
 ```
 cp .env.example .env   # fill in both tokens
 docker compose up -d --build
-docker compose logs -f   # look for "socket mode is running!"
+docker compose logs -f
 ```
 
 `restart: unless-stopped` brings the bot back after crashes and VM reboots.

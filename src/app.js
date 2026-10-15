@@ -74,11 +74,20 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
     });
   }
 
-  await client.chat.postMessage({
-    channel: APPROVER,
-    text: `Channel access request from <@${command.user_id}>`,
-    blocks: requestBlocks(command.user_id, reason),
-  });
+  try {
+    const { channel } = await client.conversations.open({ users: APPROVER });
+    await client.chat.postMessage({
+      channel: channel.id,
+      text: `Channel access request from <@${command.user_id}>`,
+      blocks: requestBlocks(command.user_id, reason),
+    });
+  } catch (err) {
+    app.logger.error(err);
+    return respond({
+      response_type: "ephemeral",
+      text: `:warning: Couldn't deliver your request (\`${err.data?.error ?? err.message}\`). Please try again later.`,
+    });
+  }
 
   return respond({
     response_type: "ephemeral",
@@ -136,7 +145,7 @@ app.message(/^\?(ping|info)\s*$/i, async ({ message, context, client, say }) => 
     const api = Math.round(performance.now() - t0);
     return say({
       thread_ts,
-      text: `:ping_pong: Pong! Slack API round trip: *${api} ms* · event delivery: *${Math.round(eventLag)} ms*`,
+      text: `:partavocado_approve: Pong! Slack API RT Delay: *${api} ms* @ event delivery: *${Math.round(eventLag)} ms*`,
     });
   }
 
