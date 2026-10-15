@@ -16,3 +16,15 @@ Only `U0A06EPFV45` can act on the buttons. IDs are constants at the top of `src/
 4. `cp .env.example .env`, fill in both tokens.
 5. **Invite the bot to `C0C962U4JSW`** (`/invite @one whole avocado`) — it can't add people to a channel it isn't in.
 6. `npm install && npm start`
+
+## Docker
+
+Socket Mode makes only outbound connections, so no ports are exposed.
+
+```
+cp .env.example .env   # fill in both tokens
+docker compose up -d --build
+docker compose logs -f   # look for "socket mode is running!"
+```
+
+`restart: unless-stopped` brings the bot back after crashes and VM reboots.

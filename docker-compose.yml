@@ -1,0 +1,6 @@
+services:
+  avocado:
+    build: .
+    container_name: one-whole-avocado
+    env_file: .env
+    restart: unless-stopped
