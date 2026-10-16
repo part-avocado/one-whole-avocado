@@ -3,6 +3,7 @@ import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
 import { gatherBuild, trackErrors, deployInfo } from "./build.js";
 import { parseTime } from "./time.js";
+import { addReminder, startReminders } from "./reminders.js";
 
 const { App, LogLevel } = bolt;
 
@@ -192,12 +193,36 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
   try {
     const { user } = await client.users.info({ user: message.user });
     const result = await parseTime(text, { tz: user.tz ?? "UTC", tzOffset: user.tz_offset ?? 0 });
-    return say({ thread_ts, text: "```\n" + JSON.stringify(result, null, 2) + "\n```" });
+    const at = Date.parse(`${result.date}T${result.time}:00Z`);
+    if (Number.isNaN(at) || at <= Date.now()) {
+      return say({ thread_ts, text: "that time is already in the past, so i can't remind you :(" });
+    }
+    addReminder({ at, user: message.user, channel: message.channel, thread_ts, message: result.message });
+
+    const when = new Intl.DateTimeFormat("en-US", {
+      dateStyle: "full",
+      timeStyle: "short",
+      timeZone: user.tz ?? "UTC",
+    }).format(at);
+    return say({
+      thread_ts,
+      text: `:partavocado-approve: got it! i'll remind you on *${when}* (${user.tz ?? "UTC"}) @ <!date^${Math.floor(at / 1000)}^{date_long} at {time}|${result.date} ${result.time} UTC>\n>${escapeMrkdwn(result.message)}`,
+    });
   } catch (err) {
     app.logger.error(err);
     return say({ thread_ts, text: "oopsies! i couldn't parse that" });
   }
 });
+
+startReminders(
+  ({ channel, thread_ts, user, message }) =>
+    app.client.chat.postMessage({
+      channel,
+      thread_ts,
+      text: `:alarm_clock: <@${user}> reminder: ${escapeMrkdwn(message)}`,
+    }),
+  app.logger,
+);
 
 let groupQueue = Promise.resolve();
 const addToGroup = (client, userId) => {

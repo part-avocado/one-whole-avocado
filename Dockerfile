@@ -9,6 +9,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY src ./src
+RUN mkdir /data && chown node /data
+ENV REMINDERS_FILE=/data/reminders.json
+VOLUME /data
 
 USER node
 CMD ["node", "src/app.js"]
