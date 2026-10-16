@@ -37,6 +37,7 @@
                 "groups:read",
                 "groups:write",
                 "im:write",
+                "reactions:write",
                 "usergroups:read",
                 "usergroups:write",
                 "users:read"

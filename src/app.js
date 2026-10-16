@@ -189,7 +189,11 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
   if (message.subtype || message.bot_id) return;
   const thread_ts = message.thread_ts;
   const text = context.matches[1].trim().slice(0, 500);
+  const reaction = { channel: message.channel, timestamp: message.ts };
+  const react = (method, name) =>
+    client.reactions[method]({ ...reaction, name }).catch((err) => app.logger.warn(err.data?.error ?? err.message));
 
+  await react("add", "eyes_shaking");
   try {
     const { user } = await client.users.info({ user: message.user });
     const result = await parseTime(text, { tz: user.tz ?? "UTC", tzOffset: user.tz_offset ?? 0 });
@@ -199,15 +203,15 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     }
     addReminder({ at, user: message.user, channel: message.channel, thread_ts, message: result.message });
 
-    const when = new Intl.DateTimeFormat("en-US", {
-      dateStyle: "full",
-      timeStyle: "short",
-      timeZone: user.tz ?? "UTC",
-    }).format(at);
-    return say({
+    const tz = user.tz ?? "UTC";
+    const dateStr = new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: tz }).format(at);
+    const timeStr = new Intl.DateTimeFormat("en-US", { timeStyle: "short", timeZone: tz }).format(at);
+    await say({
       thread_ts,
-      text: `:partavocado-approve: got it! i'll remind you on *${when}* (${user.tz ?? "UTC"}) @ <!date^${Math.floor(at / 1000)}^{date_long} at {time}|${result.date} ${result.time} UTC>\n>${escapeMrkdwn(result.message)}`,
+      text: `got it! i'll remind you on ${dateStr} @ ${timeStr} (${tz})\n> ${escapeMrkdwn(result.message)}`,
     });
+    await react("remove", "eyes_shaking");
+    await react("add", "oke");
   } catch (err) {
     app.logger.error(err);
     return say({ thread_ts, text: "oopsies! i couldn't parse that" });
