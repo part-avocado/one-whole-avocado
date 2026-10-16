@@ -11,6 +11,10 @@ try {
   if (err.code !== "ENOENT") console.error(`could not load ${FILE}:`, err);
 }
 
+// Reminders saved before ids existed get one on load.
+let nextId = reminders.reduce((m, r) => Math.max(m, r.id ?? 0), 0) + 1;
+for (const r of reminders) r.id ??= nextId++;
+
 const save = () => {
   mkdirSync(dirname(FILE), { recursive: true });
   writeFileSync(`${FILE}.tmp`, JSON.stringify(reminders));
@@ -18,8 +22,21 @@ const save = () => {
 };
 
 export function addReminder(reminder) {
-  reminders.push(reminder);
+  const added = { ...reminder, id: nextId++ };
+  reminders.push(added);
   save();
+  return added;
+}
+
+export const listReminders = (user) => reminders.filter((r) => r.user === user).sort((a, b) => a.at - b.at);
+
+// Removes a reminder only if it belongs to `user`. Returns the removed reminder or undefined.
+export function deleteReminder(id, user) {
+  const r = reminders.find((r) => r.id === id && r.user === user);
+  if (!r) return undefined;
+  reminders = reminders.filter((x) => x !== r);
+  save();
+  return r;
 }
 
 // Fires due reminders via deliver(reminder). A reminder is dropped once delivered;

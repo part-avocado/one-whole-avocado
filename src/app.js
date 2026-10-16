@@ -3,7 +3,7 @@ import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
 import { gatherBuild, trackErrors, deployInfo } from "./build.js";
 import { parseTime } from "./time.js";
-import { addReminder, startReminders } from "./reminders.js";
+import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
 
 const { App, LogLevel } = bolt;
 
@@ -93,7 +93,7 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
     if (!(await hasSignedNda(command.user_id))) {
       return respond({
         response_type: "ephemeral",
-        text: "woah! you need an NDA to do that...",
+        text: "woah! you need to sign the NDA to do that... You can do so at nda.hackclub.com!",
       });
     }
   } catch (err) {
@@ -158,9 +158,24 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
 app.action("approve_request", decide(true));
 app.action("reject_request", decide(false));
 
-// ---- ?ping / ?info / ?build (any channel the bot is in) ----
+const HELP = [
+  "*commands* (send as a message in any channel i'm in):",
+  "@ `?ping` - slack api + event delivery latency",
+  "@ `?info` - runtime details",
+  "@ `?build` - build details",
+  "@ `?time <reminder>` - timepheus v2! sets a reminder in plain english, e.g. `?time check on fd apps tomorrow at 2pm`. uses localtime",
+  "@ `?time -a` - list your active reminders (with ids)",
+  "@ `?time <id> delete` - cancel one of your reminders (`cancel` works too)",
+  "@ `?help` - this message",
+  "",
+  "*slash commands*:",
+  `@ \`/channelrequest <reason>\` - request access to n-plus-one-parts-of-an-avocado (only usable in <#${REQUEST_CHANNEL}>)`,
+  "",
+  "*automatic*:",
+  `@ leaving <#${REQUEST_CHANNEL}> removes you from n-plus-one-parts-of-an-avocado`,
+].join("\n");
 
-app.message(/^\?(ping|info|build)\s*$/i, async ({ message, context, client, say }) => {
+app.message(/^\?(ping|info|build|help)\s*$/i, async ({ message, context, client, say }) => {
   if (message.subtype || message.bot_id) return;
   const cmd = context.matches[1].toLowerCase();
   const thread_ts = message.thread_ts;
@@ -177,6 +192,8 @@ app.message(/^\?(ping|info|build)\s*$/i, async ({ message, context, client, say 
     });
   }
 
+  if (cmd === "help") return say({ thread_ts, text: HELP });
+
   if (cmd === "build") return say({ thread_ts, text: "```\n" + gatherBuild() + "\n```" });
 
   const info = await gatherInfo();
@@ -189,6 +206,26 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
   if (message.subtype || message.bot_id) return;
   const thread_ts = message.thread_ts;
   const text = context.matches[1].trim().slice(0, 500);
+
+  if (/^-a$/i.test(text)) {
+    const { user } = await client.users.info({ user: message.user });
+    const tz = user.tz ?? "UTC";
+    const fmt = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: tz });
+    const mine = listReminders(message.user);
+    if (!mine.length) return say({ thread_ts, text: "you have no active reminders" });
+    const lines = mine.map((r) => `\`${r.id}\` — ${fmt.format(r.at)} — ${escapeMrkdwn(r.message)}`);
+    return say({ thread_ts, text: `your active reminders (${tz}):\n${lines.join("\n")}\n_cancel one with \`?time <id> delete\`_` });
+  }
+
+  const del = text.match(/^(\d+)\s+(?:delete|cancel)$/i);
+  if (del) {
+    const r = deleteReminder(Number(del[1]), message.user);
+    return say({
+      thread_ts,
+      text: r ? `deleted reminder \`${r.id}\`\n> ${escapeMrkdwn(r.message)}` : `i couldn't find a reminder of yours with id \`${del[1]}\``,
+    });
+  }
+
   const reaction = { channel: message.channel, timestamp: message.ts };
   const react = (method, name) =>
     client.reactions[method]({ ...reaction, name }).catch((err) => app.logger.warn(err.data?.error ?? err.message));
@@ -201,14 +238,14 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     if (Number.isNaN(at) || at <= Date.now()) {
       return say({ thread_ts, text: "that time is already in the past, so i can't remind you :(" });
     }
-    addReminder({ at, user: message.user, channel: message.channel, thread_ts, message: result.message });
+    const { id } = addReminder({ at, user: message.user, channel: message.channel, thread_ts, message: result.message });
 
     const tz = user.tz ?? "UTC";
     const dateStr = new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: tz }).format(at);
     const timeStr = new Intl.DateTimeFormat("en-US", { timeStyle: "short", timeZone: tz }).format(at);
     await say({
       thread_ts,
-      text: `got it! i'll remind you on ${dateStr} @ ${timeStr} (${tz})\n> ${escapeMrkdwn(result.message)}`,
+      text: `got it! i'll remind you on ${dateStr} @ ${timeStr} (${tz}) [id \`${id}\`]\n> ${escapeMrkdwn(result.message)}`,
     });
     await react("remove", "eyes_shaking");
     await react("add", "oke");
