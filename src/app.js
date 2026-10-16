@@ -179,7 +179,7 @@ const HELP = [
 app.message(/^\?(ping|info|build|help)\s*$/i, async ({ message, context, client, say }) => {
   if (message.subtype || message.bot_id) return;
   const cmd = context.matches[1].toLowerCase();
-  const thread_ts = message.thread_ts;
+  const thread_ts = message.thread_ts ?? message.ts;
 
   if (cmd === "ping") {
     const received = Date.now();
