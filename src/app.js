@@ -3,6 +3,7 @@ import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
 import { gatherBuild, trackErrors, deployInfo } from "./build.js";
 import { parseTime } from "./time.js";
+import { addPending, allPending, countMessage, removePending } from "./rules.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
 
 const { App, LogLevel } = bolt;
@@ -333,6 +334,54 @@ const groupMessage = (userId) => {
 
 let botUserId;
 
+// Users who joined REQUEST_CHANNEL and haven't answered the rules prompt yet. State lives in
+// rules.js (persisted); the timers here are rebuilt from it on startup.
+const RULES_TIMEOUT_MS = 60 * 60 * 1000;
+const RULES_MAX_MESSAGES = 15;
+const ruleTimers = new Map();
+
+const clearPending = (userId) => {
+  clearTimeout(ruleTimers.get(userId));
+  ruleTimers.delete(userId);
+  removePending(userId);
+};
+
+const scheduleKick = (client, userId, delay) => {
+  clearTimeout(ruleTimers.get(userId));
+  ruleTimers.set(
+    userId,
+    setTimeout(() => kickForRules(client, userId).catch((err) => app.logger.error(err)), Math.max(0, delay)),
+  );
+};
+
+const kickForRules = async (client, userId) => {
+  clearPending(userId);
+  try {
+    await client.conversations.kick({ channel: REQUEST_CHANNEL, user: userId });
+  } catch (err) {
+    if (err.data?.error === "not_in_channel") return;
+    app.logger.error(err);
+    await client.chat
+      .postMessage({
+        channel: APPROVER,
+        text: `:warning: <@${userId}> didn't accept the rules in <#${REQUEST_CHANNEL}> but I couldn't remove them (\`${err.data?.error ?? err.message}\`). Please remove them manually.`,
+      })
+      .catch(() => {});
+    return;
+  }
+  await client.chat
+    .postMessage({
+      channel: (await client.conversations.open({ users: userId })).channel.id,
+      text: `You did not accept the rules >:( You can join back again <#${REQUEST_CHANNEL}>`,
+    })
+    .catch((err) => app.logger.error(err));
+};
+
+app.message(async ({ message, client }) => {
+  if (message.channel !== REQUEST_CHANNEL || !message.user) return;
+  if (countMessage(message.user) > RULES_MAX_MESSAGES) await kickForRules(client, message.user);
+});
+
 app.event("member_joined_channel", async ({ event, client }) => {
   if (event.channel !== REQUEST_CHANNEL) return;
   botUserId ??= (await client.auth.test()).user_id;
@@ -343,12 +392,16 @@ app.event("member_joined_channel", async ({ event, client }) => {
     user: event.user,
     ...rulesMessage(event.user),
   });
+
+  addPending(event.user);
+  scheduleKick(client, event.user, RULES_TIMEOUT_MS);
 });
 
 app.event("member_left_channel", async ({ event, client }) => {
   if (event.channel !== REQUEST_CHANNEL) return;
   botUserId ??= (await client.auth.test()).user_id;
   if (event.user === botUserId) return;
+  clearPending(event.user);
 
   try {
     await client.conversations.kick({ channel: TARGET_CHANNEL, user: event.user });
@@ -369,12 +422,14 @@ const ownButton = (body, action) => body.user.id === action.value;
 app.action("rules_agree", async ({ ack, body, action, respond }) => {
   await ack();
   if (!ownButton(body, action)) return;
+  clearPending(action.value);
   await respond({ replace_original: true, ...groupMessage(action.value) });
 });
 
 app.action("rules_decline", async ({ ack, body, action, client, respond }) => {
   await ack();
   if (!ownButton(body, action)) return;
+  clearPending(action.value);
   try {
     await client.conversations.kick({ channel: REQUEST_CHANNEL, user: action.value });
     await respond({ delete_original: true });
@@ -419,6 +474,13 @@ app.action("pinggroup_no", async ({ ack, body, action, respond }) => {
 
 await app.start();
 console.log("socket mode is running!");
+
+// Resume rules deadlines that were pending before a restart (overdue ones are kicked right away).
+app.client.token ??= process.env.SLACK_BOT_TOKEN;
+for (const { userId, joinedAt, messages } of allPending()) {
+  if (messages > RULES_MAX_MESSAGES) await kickForRules(app.client, userId);
+  else scheduleKick(app.client, userId, joinedAt + RULES_TIMEOUT_MS - Date.now());
+}
 
 // Announce new deploys in the private channel. The commit is stored in message metadata so
 // restarts/crash loops of the same commit don't repeat the announcement.
