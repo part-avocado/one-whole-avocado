@@ -38,3 +38,4 @@ Send these as a plain message in any channel the bot is in (optionally in a thre
 - `?ping` — Slack API round-trip and event delivery latency.
 - `?info` — host / container / runtime details.
 - `?build` — version, git commit, start time, uptime, Node/Bolt versions, and error count with the last few errors. In Docker the commit comes from `GIT_COMMIT`; run `./deploy.sh` after `git pull` to rebuild with it set (plain `docker compose up --build` shows `unknown`).
+- `?time <reminder>` — sends the text to Gemini (needs `GEMINI_API_KEY`; model via `GEMINI_MODEL`, default `gemini-3.8-flash`) and replies with JSON `{date, time, message}`. Date/time are UTC, converted from the sender's Slack timezone; `message` is the original wording minus scheduling words. Needs the `users:read` scope (reinstall the app after updating the manifest).

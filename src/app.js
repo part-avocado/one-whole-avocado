@@ -2,6 +2,7 @@ import "dotenv/config";
 import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
 import { gatherBuild, trackErrors, deployInfo } from "./build.js";
+import { parseTime } from "./time.js";
 
 const { App, LogLevel } = bolt;
 
@@ -179,6 +180,23 @@ app.message(/^\?(ping|info|build)\s*$/i, async ({ message, context, client, say 
 
   const info = await gatherInfo();
   return say({ thread_ts, text: "```\n" + info + "\n```" });
+});
+
+// ---- ?time <reminder> (parsed by Gemini into UTC date/time + message) ----
+
+app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) => {
+  if (message.subtype || message.bot_id) return;
+  const thread_ts = message.thread_ts;
+  const text = context.matches[1].trim().slice(0, 500);
+
+  try {
+    const { user } = await client.users.info({ user: message.user });
+    const result = await parseTime(text, { tz: user.tz ?? "UTC", tzOffset: user.tz_offset ?? 0 });
+    return say({ thread_ts, text: "```\n" + JSON.stringify(result, null, 2) + "\n```" });
+  } catch (err) {
+    app.logger.error(err);
+    return say({ thread_ts, text: ":warning: Couldn't parse that. Try something like `?time remind me tomorrow at 5pm to feed the dog`." });
+  }
 });
 
 let groupQueue = Promise.resolve();
