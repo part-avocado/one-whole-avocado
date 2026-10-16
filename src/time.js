@@ -1,5 +1,5 @@
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
-const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.8-flash";
+const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
 
 const schema = {
   type: "OBJECT",
@@ -36,8 +36,20 @@ const systemPrompt = (now, tz, offsetSec) =>
     "message is the user's wording verbatim, minus only the scheduling words (e.g. \"remind me in 15 days to check on the dog\" -> \"check on the dog\"). Do not paraphrase.",
   ].join("\n");
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
+// Gemini sheds load with 503s in spikes; retry a few times with backoff.
+async function fetchWithRetry(url, init, attempts = 4) {
+  for (let i = 1; ; i++) {
+    const res = await fetch(url, init);
+    if (res.ok || !RETRYABLE.has(res.status) || i >= attempts) return res;
+    await sleep(500 * 2 ** (i - 1));
+  }
+}
+
 export async function parseTime(text, { tz, tzOffset }) {
-  const res = await fetch(`${API}/${MODEL}:generateContent`, {
+  const res = await fetchWithRetry(`${API}/${MODEL}:generateContent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY ?? "" },
     body: JSON.stringify({
