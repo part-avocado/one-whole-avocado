@@ -165,7 +165,7 @@ const HELP = [
   "@ `?build` - build details",
   "@ `?time <reminder>` - timepheus v2! sets a reminder in plain english, e.g. `?time check on fd apps tomorrow at 2pm`. uses localtime",
   "@ `?time -a` - list your active reminders (with ids)",
-  "@ `?time <id> delete` - cancel one of your reminders (`cancel` works too)",
+  "@ `?time <id> delete` - cancel one of your reminders (`cancel` works too). `?time delete` alone removes your latest",
   "@ `?help` - this message",
   "",
   "*slash commands*:",
@@ -204,7 +204,7 @@ app.message(/^\?(ping|info|build|help)\s*$/i, async ({ message, context, client,
 
 app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) => {
   if (message.subtype || message.bot_id) return;
-  const thread_ts = message.thread_ts;
+  const thread_ts = message.thread_ts ?? message.ts;
   const text = context.matches[1].trim().slice(0, 500);
 
   if (/^-a$/i.test(text)) {
@@ -217,12 +217,20 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     return say({ thread_ts, text: `your active reminders (${tz}):\n${lines.join("\n")}\n_cancel one with \`?time <id> delete\`_` });
   }
 
-  const del = text.match(/^(\d+)\s+(?:delete|cancel)$/i);
+  const del = text.match(/^(?:(\d+)\s+(?:delete|cancel)|(?:delete|cancel)\s+(\d+))$/i);
   if (del) {
-    const r = deleteReminder(Number(del[1]), message.user);
+    const id = del[1] ?? del[2];
+    const r = deleteReminder(Number(id), message.user);
     return say({
       thread_ts,
-      text: r ? `deleted reminder \`${r.id}\`\n> ${escapeMrkdwn(r.message)}` : `i couldn't find a reminder of yours with id \`${del[1]}\``,
+      text: r ? `deleted reminder \`${r.id}\`\n> ${escapeMrkdwn(r.message)}` : `i couldn't find a reminder of yours with id \`${id}\``,
+    });
+  }
+  if (/^(?:delete|cancel)$/i.test(text)) {
+    const r = deleteReminder(undefined, message.user);
+    return say({
+      thread_ts,
+      text: r ? `deleted your latest reminder \`${r.id}\`\n> ${escapeMrkdwn(r.message)}` : "you have no active reminders",
     });
   }
 

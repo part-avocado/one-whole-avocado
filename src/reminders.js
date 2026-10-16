@@ -30,9 +30,11 @@ export function addReminder(reminder) {
 
 export const listReminders = (user) => reminders.filter((r) => r.user === user).sort((a, b) => a.at - b.at);
 
-// Removes a reminder only if it belongs to `user`. Returns the removed reminder or undefined.
+// Removes a reminder only if it belongs to `user`. Without an id, removes their most recently
+// created one. Returns the removed reminder or undefined.
 export function deleteReminder(id, user) {
-  const r = reminders.find((r) => r.id === id && r.user === user);
+  const mine = reminders.filter((r) => r.user === user);
+  const r = id == null ? mine.reduce((a, b) => (!a || b.id > a.id ? b : a), undefined) : mine.find((r) => r.id === id);
   if (!r) return undefined;
   reminders = reminders.filter((x) => x !== r);
   save();
