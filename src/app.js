@@ -195,7 +195,7 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     return say({ thread_ts, text: "```\n" + JSON.stringify(result, null, 2) + "\n```" });
   } catch (err) {
     app.logger.error(err);
-    return say({ thread_ts, text: ":warning: Couldn't parse that. Try something like `?time remind me tomorrow at 5pm to feed the dog`." });
+    return say({ thread_ts, text: "oopsies! i couldn't parse that" });
   }
 });
 
