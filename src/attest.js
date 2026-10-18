@@ -7,9 +7,9 @@ const FILE = process.env.ATTESTATIONS_FILE ?? "data/attestations.json";
 const SELF = "\u0000SELF\u0000";
 const STATEMENT =
   `I, ${SELF}, being of sound mind and acting of my own free will, do hereby attest and affirm that I applied for admission to this channel voluntarily and without coercion. ` +
-  `I acknowledge that I may receive information pertaining to @partavocado (hereinafter "Confidential Information"), ` +
-  `and I covenant and agree that I shall not disclose, distribute, or otherwise disseminate any Confidential Information absent express prior permission to do so. ` +
-  `I further acknowledge that any breach of the foregoing may result in my removal from, and permanent exclusion from re-entry to, this channel.`;
+  `I acknowledge that I may receive information pertaining to @partavocado, ` +
+  `and I covenant and agree that I shall not disclose, distribute, or otherwise disseminate any aforementioned information absent express prior permission to do so. ` +
+  `I further acknowledge that any breach of the foregoing will result in removal from this channel.`;
 
 // pending: userId -> { reason, approverChannel, approverTs, dmChannel, dmTs, approvedAt }: approved, not yet signed.
 // signed: userId -> [{ signedAt, text }]: every attestation a user has submitted.
