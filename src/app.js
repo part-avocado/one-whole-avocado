@@ -7,11 +7,13 @@ import { addPending, allPending, countMessage, removePending } from "./rules.js"
 import {
   addPendingAttestation,
   checkAttestation,
+  describeDiffs,
   getPendingAttestation,
   recordAttestation,
   removePendingAttestation,
   renderAttestation,
   statementFor,
+  updatePendingAttestation,
 } from "./attest.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
 
@@ -197,28 +199,26 @@ app.action("reject_request", decide(false));
 app.action("attest_open", async ({ ack, body, action, client, respond }) => {
   await ack();
   if (body.user.id !== action.value) return;
-  if (!getPendingAttestation(action.value)) {
+  const pending = getPendingAttestation(action.value);
+  if (!pending) {
     return respond({ replace_original: true, text: "This approval is no longer valid. Apply again with `/channelrequest`." });
   }
+  if (pending.review) return;
   await client.views.open({ trigger_id: body.trigger_id, view: attestModal(action.value) });
 });
 
-app.view("attest_submit", async ({ ack, body, view, client }) => {
-  const userId = body.user.id;
-  const pending = getPendingAttestation(userId);
-  if (!pending) {
-    return ack({
-      response_action: "errors",
-      errors: { attest_input: "This approval is no longer valid. Apply again with /channelrequest." },
-    });
-  }
+const quote = (text) => `>${text.replace(/\n/g, "\n>")}`;
 
-  const richText = view.state.values.attest_input.attest_text.rich_text_value;
-  const error = checkAttestation(richText, userId, APPROVER);
-  if (error) return ack({ response_action: "errors", errors: { attest_input: error } });
-  await ack();
+const setDm = (client, pending, text, blocks) =>
+  client.chat.update({
+    channel: pending.dmChannel,
+    ts: pending.dmTs,
+    text,
+    blocks: blocks ?? [{ type: "section", text: { type: "mrkdwn", text } }],
+  });
 
-  const signed = renderAttestation(richText);
+// Records a signed attestation, adds the user, and tells both sides. `note` explains how it was accepted.
+const finishAttestation = async (client, userId, pending, signed, note) => {
   recordAttestation(userId, signed);
 
   let footer;
@@ -249,17 +249,76 @@ app.view("attest_submit", async ({ ack, body, view, client }) => {
       channel: pending.approverChannel,
       thread_ts: pending.approverTs,
       reply_broadcast: true,
-      text: `:memo: <@${userId}> signed the attestation:\n>${signed.replace(/\n/g, "\n>")}`,
+      text: `:memo: <@${userId}> signed the attestation (${note}):\n${quote(signed)}`,
     }),
-    client.chat.update({
-      channel: pending.dmChannel,
-      ts: pending.dmTs,
-      text: dmText,
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: dmText } }],
+    setDm(client, pending, dmText),
+  ]);
+  for (const r of results) if (r.status === "rejected") app.logger.error(r.reason);
+};
+
+app.view("attest_submit", async ({ ack, body, view, client }) => {
+  const userId = body.user.id;
+  const pending = getPendingAttestation(userId);
+  if (!pending || pending.review) {
+    return ack({
+      response_action: "errors",
+      errors: { attest_input: pending ? "Your last attempt is already under review." : "This approval is no longer valid. Apply again with /channelrequest." },
+    });
+  }
+
+  const richText = view.state.values.attest_input.attest_text.rich_text_value;
+  const result = checkAttestation(richText, userId, APPROVER);
+  if (result.status === "fail") return ack({ response_action: "errors", errors: { attest_input: result.error } });
+  await ack();
+
+  const signed = renderAttestation(richText);
+  if (result.status === "pass") {
+    const note = result.typos ? `lax match: ${describeDiffs(result.diffs)}` : "exact match";
+    return finishAttestation(client, userId, pending, signed, note);
+  }
+
+  // Close but not close enough: the approver decides.
+  updatePendingAttestation(userId, { review: { text: signed } });
+  const reviewText = `:mag: <@${userId}>'s attestation doesn't quite match. Differences: ${describeDiffs(result.diffs)}\n${quote(signed)}`;
+  const results = await Promise.allSettled([
+    client.chat.postMessage({
+      channel: pending.approverChannel,
+      thread_ts: pending.approverTs,
+      reply_broadcast: true,
+      text: reviewText,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: reviewText } },
+        buttons(userId, { id: "attest_accept", label: "Accept" }, { id: "attest_reject", label: "Make them retry", danger: true }),
+      ],
     }),
+    setDm(client, pending, ":hourglass_flowing_sand: Your attestation was close but not exact, so it's been sent to partavocado for review."),
   ]);
   for (const r of results) if (r.status === "rejected") app.logger.error(r.reason);
 });
+
+const reviewAttestation = (accepted) => async ({ ack, body, action, client, respond }) => {
+  await ack();
+  if (body.user.id !== APPROVER) return;
+  const userId = action.value;
+  const pending = getPendingAttestation(userId);
+  if (!pending?.review) return respond({ replace_original: true, text: "This attestation is no longer pending." });
+  const { text } = pending.review;
+  updatePendingAttestation(userId, { review: undefined });
+
+  await respond({
+    replace_original: true,
+    text: `${accepted ? ":white_check_mark: Accepted" : ":leftwards_arrow_with_hook: Sent back"} <@${userId}>'s attestation:\n${quote(text)}`,
+  });
+  if (accepted) return finishAttestation(client, userId, pending, text, "accepted on review");
+
+  const retry = attestPrompt(userId);
+  retry.text = `partavocado didn't accept your attestation. Please sign it again, typing it exactly.`;
+  retry.blocks[0].text.text = retry.text;
+  await setDm(client, pending, retry.text, retry.blocks).catch((err) => app.logger.error(err));
+};
+
+app.action("attest_accept", reviewAttestation(true));
+app.action("attest_reject", reviewAttestation(false));
 
 const HELP = [
   "*commands* (send as a message in any channel i'm in):",

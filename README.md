@@ -4,7 +4,7 @@ A Slack bouncer bot (Bolt for JS, Socket Mode).
 
 1. A user runs `/channelrequest <reason>` in `C0C26M2E3FT` (anywhere else it refuses).
 2. The bot DMs `U0A06EPFV45` with the user's ID, a ping, the reason, and Approve / Reject buttons.
-3. **Approve** DMs the user a **Sign attestation** button. It opens a modal where they must type the attestation exactly, mentioning themselves with `@`. A wrong attempt shows where it stops matching, and they can retry. Once it matches, the bot adds them to `C0C962U4JSW`, updates the approval message, and posts the signed attestation to `U0A06EPFV45` in that message's thread (also shown in the DM). Signed attestations are logged in `ATTESTATIONS_FILE` (default `data/attestations.json`). **Reject** does nothing visible to the user.
+3. **Approve** DMs the user a **Sign attestation** button. It opens a modal where they must type the attestation, mentioning themselves with `@`. Matching is word by word and ignores case, spacing and punctuation. A few misspelled words still pass, but a missing, extra or changed word doesn't (dropping a "not" changes the meaning). Attempts with up to 10 such errors go to `U0A06EPFV45` with **Accept** / **Make them retry** buttons; anything worse shows where it stops matching so they can retry. Once it's accepted, the bot adds them to `C0C962U4JSW`, updates the approval message, and posts the signed attestation to `U0A06EPFV45` in that message's thread (also shown in the DM). Signed attestations are logged in `ATTESTATIONS_FILE` (default `data/attestations.json`). **Reject** does nothing visible to the user.
 
 4. If a user leaves `C0C26M2E3FT`, the bot also removes them from `C0C962U4JSW` and cancels any unsigned attestation.
 
