@@ -15,7 +15,8 @@ const STATEMENT =
 // pending: userId -> { reason, approverChannel, approverTs, dmChannel, dmTs, approvedAt, review? }: approved, not yet
 // signed. `review` holds a near-miss attestation waiting on the approver.
 // signed: userId -> [{ signedAt, text }]: every attestation a user has submitted.
-let state = { pending: {}, signed: {} };
+// requests: userId -> { at }: requests waiting on Approve / Reject.
+let state = { pending: {}, signed: {}, requests: {} };
 try {
   state = { ...state, ...JSON.parse(readFileSync(FILE, "utf8")) };
 } catch (err) {
@@ -28,7 +29,23 @@ const save = () => {
   renameSync(`${FILE}.tmp`, FILE);
 };
 
+// A user may have one request in flight at a time: from /channelrequest until it's rejected or attested.
+export const hasActiveRequest = (userId) => Boolean(state.requests[userId] || state.pending[userId]);
+
+export const openRequest = (userId) => {
+  state.requests[userId] = { at: Date.now() };
+  save();
+};
+
+export const closeRequest = (userId) => {
+  if (!state.requests[userId] && !state.pending[userId]) return;
+  delete state.requests[userId];
+  delete state.pending[userId];
+  save();
+};
+
 export const addPendingAttestation = (userId, data) => {
+  delete state.requests[userId];
   state.pending[userId] = { ...data, approvedAt: Date.now() };
   save();
 };
@@ -38,12 +55,6 @@ export const getPendingAttestation = (userId) => state.pending[userId];
 export const updatePendingAttestation = (userId, patch) => {
   if (!state.pending[userId]) return;
   Object.assign(state.pending[userId], patch);
-  save();
-};
-
-export const removePendingAttestation = (userId) => {
-  if (!state.pending[userId]) return;
-  delete state.pending[userId];
   save();
 };
 
