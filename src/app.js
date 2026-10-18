@@ -10,7 +10,9 @@ import {
   describeDiffs,
   getPendingAttestation,
   recordAttestation,
-  removePendingAttestation,
+  closeRequest,
+  hasActiveRequest,
+  openRequest,
   renderAttestation,
   statementFor,
   updatePendingAttestation,
@@ -73,6 +75,16 @@ const requestBlocks = (userId, reason, footer) => [
       },
 ];
 
+const isTargetMember = async (client, userId) => {
+  let cursor;
+  do {
+    const res = await client.conversations.members({ channel: TARGET_CHANNEL, limit: 1000, cursor });
+    if (res.members.includes(userId)) return true;
+    cursor = res.response_metadata?.next_cursor;
+  } while (cursor);
+  return false;
+};
+
 app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   await ack();
 
@@ -91,7 +103,20 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
     });
   }
 
+  if (hasActiveRequest(command.user_id)) {
+    return respond({
+      response_type: "ephemeral",
+      text: "You already have a request in progress. Wait for it to be decided (or finish signing the attestation) before applying again.",
+    });
+  }
+  // Claimed before any await so two quick requests can't both get through.
+  openRequest(command.user_id);
+
   try {
+    if (await isTargetMember(client, command.user_id)) {
+      closeRequest(command.user_id);
+      return respond({ response_type: "ephemeral", text: `You're already in <#${TARGET_CHANNEL}>.` });
+    }
     const { channel } = await client.conversations.open({ users: APPROVER });
     await client.chat.postMessage({
       channel: channel.id,
@@ -99,6 +124,7 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
       blocks: requestBlocks(command.user_id, reason),
     });
   } catch (err) {
+    closeRequest(command.user_id);
     app.logger.error(err);
     return respond({
       response_type: "ephemeral",
@@ -179,9 +205,11 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
       footer = `:hourglass_flowing_sand: Approved — waiting for <@${userId}> to sign the attestation`;
     } catch (err) {
       app.logger.error(err);
+      closeRequest(userId);
       footer = `:warning: Couldn't send <@${userId}> the attestation (\`${err.data?.error ?? err.message}\`). Buttons removed; follow up manually.`;
     }
   } else {
+    closeRequest(userId);
     footer = ":x: Rejected — the user was not notified.";
   }
 
@@ -563,7 +591,7 @@ app.event("member_left_channel", async ({ event, client }) => {
   botUserId ??= (await client.auth.test()).user_id;
   if (event.user === botUserId) return;
   clearPending(event.user);
-  removePendingAttestation(event.user);
+  closeRequest(event.user);
 
   try {
     await client.conversations.kick({ channel: TARGET_CHANNEL, user: event.user });
