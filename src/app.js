@@ -4,6 +4,15 @@ import { gatherInfo } from "./info.js";
 import { gatherBuild, trackErrors, deployInfo } from "./build.js";
 import { parseTime } from "./time.js";
 import { addPending, allPending, countMessage, removePending } from "./rules.js";
+import {
+  addPendingAttestation,
+  checkAttestation,
+  getPendingAttestation,
+  recordAttestation,
+  removePendingAttestation,
+  renderAttestation,
+  statementFor,
+} from "./attest.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
 
 const { App, LogLevel } = bolt;
@@ -13,7 +22,6 @@ const TARGET_CHANNEL = "C0C962U4JSW";
 const APPROVER = "U0A06EPFV45";
 const PING_GROUP_ID = "S0C9DFYS90T";
 const PING_GROUP_HANDLE = "cutavocados";
-const NDA_API = "https://nda.hackclub.com/api/v1/nda_status";
 const RULES_URL = "https://hackclub.enterprise.slack.com/docs/T0266FRGM/F0C9ML51CTB";
 
 const app = new App({
@@ -28,7 +36,7 @@ trackErrors(app.logger);
 const escapeMrkdwn = (s) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-const requestBlocks = (userId, reason, footer, ndaUnverified) => [
+const requestBlocks = (userId, reason, footer) => [
   {
     type: "section",
     text: {
@@ -37,7 +45,6 @@ const requestBlocks = (userId, reason, footer, ndaUnverified) => [
         `:door: *Channel access request*\n` +
         `*User:* <@${userId}> (\`${userId}\`)\n` +
         `*Ping:* <@${userId}>\n` +
-        (ndaUnverified ? `:warning: *NDA status could not be verified* — please check manually.\n` : "") +
         `*Reason:*\n>${escapeMrkdwn(reason).replace(/\n/g, "\n>")}`,
     },
   },
@@ -51,25 +58,18 @@ const requestBlocks = (userId, reason, footer, ndaUnverified) => [
             action_id: "approve_request",
             text: { type: "plain_text", text: "Approve" },
             style: "primary",
-            value: JSON.stringify({ userId, reason, ndaUnverified }),
+            value: JSON.stringify({ userId, reason }),
           },
           {
             type: "button",
             action_id: "reject_request",
             text: { type: "plain_text", text: "Reject" },
             style: "danger",
-            value: JSON.stringify({ userId, reason, ndaUnverified }),
+            value: JSON.stringify({ userId, reason }),
           },
         ],
       },
 ];
-
-// Legacy signatures are valid agreements, so any "signed" status passes.
-const hasSignedNda = async (slackId) => {
-  const res = await fetch(`${NDA_API}/${encodeURIComponent(slackId)}`);
-  if (!res.ok) throw new Error(`NDA API returned ${res.status}`);
-  return (await res.json()).status === "signed";
-};
 
 app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   await ack();
@@ -89,26 +89,12 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
     });
   }
 
-  let ndaUnverified = false;
-  try {
-    if (!(await hasSignedNda(command.user_id))) {
-      return respond({
-        response_type: "ephemeral",
-        text: "woah! you need to sign the NDA to do that... You can do so at nda.hackclub.com!",
-      });
-    }
-  } catch (err) {
-    // Fail open: the approver makes the final call, so flag it instead of blocking.
-    app.logger.error(err);
-    ndaUnverified = true;
-  }
-
   try {
     const { channel } = await client.conversations.open({ users: APPROVER });
     await client.chat.postMessage({
       channel: channel.id,
       text: `Channel access request from <@${command.user_id}>`,
-      blocks: requestBlocks(command.user_id, reason, undefined, ndaUnverified),
+      blocks: requestBlocks(command.user_id, reason),
     });
   } catch (err) {
     app.logger.error(err);
@@ -124,25 +110,74 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   });
 });
 
+const attestPrompt = (userId) => {
+  const text =
+    `:tada: Your request to join <#${TARGET_CHANNEL}> was approved! ` +
+    `Before you're added, you need to sign an attestation.`;
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            action_id: "attest_open",
+            text: { type: "plain_text", text: "Sign attestation" },
+            style: "primary",
+            value: userId,
+          },
+        ],
+      },
+    ],
+  };
+};
+
+const attestModal = (userId) => ({
+  type: "modal",
+  callback_id: "attest_submit",
+  title: { type: "plain_text", text: "Attestation" },
+  submit: { type: "plain_text", text: "Sign" },
+  close: { type: "plain_text", text: "Cancel" },
+  blocks: [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: "Type the following *exactly*. Where it mentions you, type `@` and pick yourself from the list." },
+    },
+    { type: "section", text: { type: "mrkdwn", text: `>${statementFor(userId)}` } },
+    {
+      type: "input",
+      block_id: "attest_input",
+      label: { type: "plain_text", text: "Your attestation" },
+      element: { type: "rich_text_input", action_id: "attest_text" },
+    },
+  ],
+});
+
 const decide = (approved) => async ({ ack, body, action, client }) => {
   await ack();
 
   if (body.user.id !== APPROVER) return;
 
-  const { userId, reason, ndaUnverified } = JSON.parse(action.value);
+  const { userId, reason } = JSON.parse(action.value);
   let footer;
 
   if (approved) {
     try {
-      await client.conversations.invite({ channel: TARGET_CHANNEL, users: userId });
-      footer = `:white_check_mark: Approved — <@${userId}> added to <#${TARGET_CHANNEL}>`;
+      const { channel } = await client.conversations.open({ users: userId });
+      const { ts } = await client.chat.postMessage({ channel: channel.id, ...attestPrompt(userId) });
+      addPendingAttestation(userId, {
+        reason,
+        approverChannel: body.channel.id,
+        approverTs: body.message.ts,
+        dmChannel: channel.id,
+        dmTs: ts,
+      });
+      footer = `:hourglass_flowing_sand: Approved — waiting for <@${userId}> to sign the attestation`;
     } catch (err) {
-      if (err.data?.error === "already_in_channel") {
-        footer = `:white_check_mark: Approved — <@${userId}> was already in <#${TARGET_CHANNEL}>`;
-      } else {
-        app.logger.error(err);
-        footer = `:warning: Invite failed (\`${err.data?.error ?? err.message}\`). Buttons removed; retry manually.`;
-      }
+      app.logger.error(err);
+      footer = `:warning: Couldn't send <@${userId}> the attestation (\`${err.data?.error ?? err.message}\`). Buttons removed; follow up manually.`;
     }
   } else {
     footer = ":x: Rejected — the user was not notified.";
@@ -152,12 +187,79 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
     channel: body.channel.id,
     ts: body.message.ts,
     text: footer,
-    blocks: requestBlocks(userId, reason, footer, ndaUnverified),
+    blocks: requestBlocks(userId, reason, footer),
   });
 };
 
 app.action("approve_request", decide(true));
 app.action("reject_request", decide(false));
+
+app.action("attest_open", async ({ ack, body, action, client, respond }) => {
+  await ack();
+  if (body.user.id !== action.value) return;
+  if (!getPendingAttestation(action.value)) {
+    return respond({ replace_original: true, text: "This approval is no longer valid. Apply again with `/channelrequest`." });
+  }
+  await client.views.open({ trigger_id: body.trigger_id, view: attestModal(action.value) });
+});
+
+app.view("attest_submit", async ({ ack, body, view, client }) => {
+  const userId = body.user.id;
+  const pending = getPendingAttestation(userId);
+  if (!pending) {
+    return ack({
+      response_action: "errors",
+      errors: { attest_input: "This approval is no longer valid. Apply again with /channelrequest." },
+    });
+  }
+
+  const richText = view.state.values.attest_input.attest_text.rich_text_value;
+  const error = checkAttestation(richText, userId, APPROVER);
+  if (error) return ack({ response_action: "errors", errors: { attest_input: error } });
+  await ack();
+
+  const signed = renderAttestation(richText);
+  recordAttestation(userId, signed);
+
+  let footer;
+  let dmText;
+  try {
+    await client.conversations.invite({ channel: TARGET_CHANNEL, users: userId });
+    footer = `:white_check_mark: Attested — <@${userId}> added to <#${TARGET_CHANNEL}>`;
+    dmText = `:partavocado-approve: Signed! You've been added to <#${TARGET_CHANNEL}>.`;
+  } catch (err) {
+    if (err.data?.error === "already_in_channel") {
+      footer = `:white_check_mark: Attested — <@${userId}> was already in <#${TARGET_CHANNEL}>`;
+      dmText = `:partavocado-approve: Signed! You're already in <#${TARGET_CHANNEL}>.`;
+    } else {
+      app.logger.error(err);
+      footer = `:warning: Attested, but the invite failed (\`${err.data?.error ?? err.message}\`). Add <@${userId}> manually.`;
+      dmText = `Signed! I couldn't add you automatically, so you'll be added manually soon.`;
+    }
+  }
+
+  const results = await Promise.allSettled([
+    client.chat.update({
+      channel: pending.approverChannel,
+      ts: pending.approverTs,
+      text: footer,
+      blocks: requestBlocks(userId, pending.reason, footer),
+    }),
+    client.chat.postMessage({
+      channel: pending.approverChannel,
+      thread_ts: pending.approverTs,
+      reply_broadcast: true,
+      text: `:memo: <@${userId}> signed the attestation:\n>${signed.replace(/\n/g, "\n>")}`,
+    }),
+    client.chat.update({
+      channel: pending.dmChannel,
+      ts: pending.dmTs,
+      text: dmText,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: dmText } }],
+    }),
+  ]);
+  for (const r of results) if (r.status === "rejected") app.logger.error(r.reason);
+});
 
 const HELP = [
   "*commands* (send as a message in any channel i'm in):",
@@ -402,6 +504,7 @@ app.event("member_left_channel", async ({ event, client }) => {
   botUserId ??= (await client.auth.test()).user_id;
   if (event.user === botUserId) return;
   clearPending(event.user);
+  removePendingAttestation(event.user);
 
   try {
     await client.conversations.kick({ channel: TARGET_CHANNEL, user: event.user });
