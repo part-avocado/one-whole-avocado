@@ -40,6 +40,7 @@ export const help = [
   "@ `?time <id> delete` - cancel one of your reminders (`cancel` works too). `?time delete` alone removes your latest",
   `@ \`?digest\` - in a thread, forwards its first message to the other avocado channel as the original poster (members of both <#${REQUEST_CHANNEL}> and n-plus-one-parts-of-an-avocado only)`,
   "@ `?digest full` - same, but forwards the whole thread. digesting a thread again posts into the same copy (full only sends new messages)",
+  "@ `?undigest` - in a digested thread or its copy, deletes every copy i made of it (replies from other people stay)",
   "@ `?help` - this message",
   "",
   "*slash commands*:",
@@ -83,6 +84,18 @@ export const digest = {
   missingScope: ":warning: digest needs the `chat:write.customize` scope to post as the original author. reinstall the app to grant it",
   done: (count: number, full: boolean, dest: string, permalink: string, repeat: boolean) =>
     `:partavocado-approve: digested ${full ? `${count} message${count === 1 ? "" : "s"}` : "the first message"} to ${repeat ? "the existing thread in " : ""}<#${dest}> (<${permalink}|view>)`,
+};
+
+// ---- ?undigest ----
+
+export const undigest = {
+  notThread: "run `?undigest` in a digested thread (or its copy) to delete the copy",
+  notMember: "you need to be in both channels to undigest threads",
+  nothing: "this thread hasn't been digested",
+  failed: (code: string) => `:warning: undigest failed (\`${code}\`)`,
+  done: (deleted: number, failed: number) =>
+    `:partavocado-approve: deleted ${deleted} digested message${deleted === 1 ? "" : "s"}` +
+    (failed ? `. ${failed} couldn't be deleted, run \`?undigest\` again to retry` : ""),
 };
 
 // ---- joining / leaving ----

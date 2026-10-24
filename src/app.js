@@ -17,7 +17,7 @@ import {
   updatePendingAttestation,
 } from "./attest.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
-import { forgetDigest, getDigest, recordForwarded } from "./digests.js";
+import { findDigests, forgetDigest, getDigest, recordForwarded, setPosted } from "./digests.js";
 import { REQUEST_CHANNEL, TARGET_CHANNEL, APPROVER, PING_GROUP_ID } from "./config.ts";
 import * as S from "./config.ts";
 
@@ -479,8 +479,8 @@ const hasUsergroup = (node) =>
     ? node.some(hasUsergroup)
     : Boolean(node && typeof node === "object" && (node.type === "usergroup" || Object.values(node).some(hasUsergroup)));
 
-const DIGEST_COMMAND = /^\?digest(?:\s+full)?\s*$/i;
-// Marks the bot's own replies to ?digest so a later full digest doesn't forward them.
+const DIGEST_COMMAND = /^\?(?:un)?digest(?:\s+full)?\s*$/i;
+// Marks the bot's own replies to ?digest/?undigest so a later full digest doesn't forward them.
 const RECEIPT = { event_type: "digest_receipt", event_payload: { v: 1 } };
 
 const threadExists = async (client, channel, ts) => {
@@ -558,7 +558,7 @@ const forwardThread = async (client, message, dest, full) => {
     rootTs ??= res.ts;
     lastTs = res.ts;
     // Recorded per message so a digest that fails partway resumes where it stopped.
-    recordForwarded(message.channel, message.thread_ts, full, dest, rootTs, m.ts);
+    recordForwarded(message.channel, message.thread_ts, full, dest, rootTs, m.ts, res.ts);
   }
 
   return { replies, count: toForward.length, rootTs, lastTs, repeat: Boolean(existing) };
@@ -595,6 +595,75 @@ app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, s
 
   const { permalink } = await client.chat.getPermalink({ channel: dest, message_ts: result.lastTs });
   return reply(S.digest.done(result.count, full, dest, permalink, result.repeat));
+});
+
+// ---- ?undigest: delete the copies made by ?digest, from either the source or the copy thread ----
+
+const NOT_FOUND = ["message_not_found", "thread_not_found"];
+
+// Deletes the bot's copies for one digest; returns the ts of any it couldn't delete.
+const deleteCopies = async (client, d) => {
+  let posted = d.posted;
+  if (!posted) {
+    // Recorded before copies were tracked: fall back to the bot's own non-receipt messages in the copy thread.
+    const { bot_id } = await client.auth.test();
+    posted = [];
+    try {
+      for await (const page of client.paginate("conversations.replies", { channel: d.dest, ts: d.rootTs, include_all_metadata: true })) {
+        posted.push(...page.messages.filter((m) => m.bot_id === bot_id && m.metadata?.event_type !== RECEIPT.event_type).map((m) => m.ts));
+      }
+    } catch (err) {
+      if (!NOT_FOUND.includes(err.data?.error)) throw err;
+    }
+  }
+
+  const failed = [];
+  // Newest first, so the root goes last and vanishes outright if no one else replied to it.
+  for (const ts of [...posted].sort().reverse()) {
+    try {
+      await client.chat.delete({ channel: d.dest, ts });
+    } catch (err) {
+      if (NOT_FOUND.includes(err.data?.error)) continue;
+      app.logger.warn(`couldn't delete digest copy ${d.dest}/${ts}:`, err.data?.error ?? err.message);
+      failed.push(ts);
+    }
+  }
+  return { deleted: posted.length - failed.length, failed };
+};
+
+app.message(/^\?undigest\s*$/i, async ({ message, client, say }) => {
+  if (message.subtype || message.bot_id) return;
+  const thread_ts = message.thread_ts ?? message.ts;
+  const reply = (text) => say({ thread_ts, text, metadata: RECEIPT });
+
+  if (![REQUEST_CHANNEL, TARGET_CHANNEL].includes(message.channel)) return reply(S.digest.wrongChannel);
+  if (!message.thread_ts) return reply(S.undigest.notThread);
+
+  const [inPublic, inPrivate] = await Promise.all([
+    isMember(client, REQUEST_CHANNEL, message.user),
+    isMember(client, TARGET_CHANNEL, message.user),
+  ]);
+  if (!inPublic || !inPrivate) return reply(S.undigest.notMember);
+
+  const found = findDigests(message.channel, message.thread_ts);
+  if (!found.length) return reply(S.undigest.nothing);
+
+  let deleted = 0;
+  let failed = 0;
+  try {
+    for (const d of found) {
+      const result = await deleteCopies(client, d);
+      deleted += result.deleted;
+      failed += result.failed.length;
+      // Keep whatever couldn't be deleted so a later ?undigest can retry it.
+      if (result.failed.length) setPosted(d.channel, d.threadTs, d.full, result.failed);
+      else forgetDigest(d.channel, d.threadTs, d.full);
+    }
+  } catch (err) {
+    app.logger.error(err);
+    return reply(S.undigest.failed(err.data?.error ?? err.message));
+  }
+  return reply(S.undigest.done(deleted, failed));
 });
 
 startReminders(
