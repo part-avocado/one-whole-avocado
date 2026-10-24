@@ -3,6 +3,19 @@ import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
 import { gatherBuild, trackErrors, deployInfo } from "./build.js";
 import { parseTime } from "./time.js";
+import {
+  addPendingAttestation,
+  checkAttestation,
+  describeDiffs,
+  getPendingAttestation,
+  recordAttestation,
+  closeRequest,
+  hasActiveRequest,
+  openRequest,
+  renderAttestation,
+  statementFor,
+  updatePendingAttestation,
+} from "./attest.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
 import { REQUEST_CHANNEL, TARGET_CHANNEL, APPROVER, PING_GROUP_ID } from "./config.ts";
 import * as S from "./config.ts";
@@ -71,6 +84,16 @@ const requestBlocks = (userId, reason, footer) => [
       },
 ];
 
+const isTargetMember = async (client, userId) => {
+  let cursor;
+  do {
+    const res = await client.conversations.members({ channel: TARGET_CHANNEL, limit: 1000, cursor });
+    if (res.members.includes(userId)) return true;
+    cursor = res.response_metadata?.next_cursor;
+  } while (cursor);
+  return false;
+};
+
 app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   await ack();
 
@@ -89,7 +112,20 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
     });
   }
 
+  if (hasActiveRequest(command.user_id)) {
+    return respond({
+      response_type: "ephemeral",
+      text: "You already have a request in progress. Wait for it to be decided (or finish signing the attestation) before applying again.",
+    });
+  }
+  // Claimed before any await so two quick requests can't both get through.
+  openRequest(command.user_id);
+
   try {
+    if (await isTargetMember(client, command.user_id)) {
+      closeRequest(command.user_id);
+      return respond({ response_type: "ephemeral", text: `You're already in <#${TARGET_CHANNEL}>.` });
+    }
     const { channel } = await client.conversations.open({ users: APPROVER });
     await client.chat.postMessage({
       channel: channel.id,
@@ -97,6 +133,7 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
       blocks: requestBlocks(command.user_id, reason),
     });
   } catch (err) {
+    closeRequest(command.user_id);
     app.logger.error(err);
     return respond({
       response_type: "ephemeral",
@@ -110,6 +147,51 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   });
 });
 
+const attestPrompt = (userId) => {
+  const text =
+    `:tada: Your request to join <#${TARGET_CHANNEL}> was approved! ` +
+    `Before you're added, you need to sign an attestation.`;
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            action_id: "attest_open",
+            text: { type: "plain_text", text: "Sign attestation" },
+            style: "primary",
+            value: userId,
+          },
+        ],
+      },
+    ],
+  };
+};
+
+const attestModal = (userId) => ({
+  type: "modal",
+  callback_id: "attest_submit",
+  title: { type: "plain_text", text: "Attestation" },
+  submit: { type: "plain_text", text: "Sign" },
+  close: { type: "plain_text", text: "Cancel" },
+  blocks: [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: "Type the following *exactly*. Where it mentions you, type `@` and pick yourself from the list." },
+    },
+    { type: "section", text: { type: "mrkdwn", text: `>${statementFor(userId)}` } },
+    {
+      type: "input",
+      block_id: "attest_input",
+      label: { type: "plain_text", text: "Your attestation" },
+      element: { type: "rich_text_input", action_id: "attest_text" },
+    },
+  ],
+});
+
 const decide = (approved) => async ({ ack, body, action, client }) => {
   await ack();
 
@@ -120,17 +202,23 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
 
   if (approved) {
     try {
-      await client.conversations.invite({ channel: TARGET_CHANNEL, users: userId });
-      footer = S.request.approved(userId);
+      const { channel } = await client.conversations.open({ users: userId });
+      const { ts } = await client.chat.postMessage({ channel: channel.id, ...attestPrompt(userId) });
+      addPendingAttestation(userId, {
+        reason,
+        approverChannel: body.channel.id,
+        approverTs: body.message.ts,
+        dmChannel: channel.id,
+        dmTs: ts,
+      });
+      footer = `:hourglass_flowing_sand: Approved — waiting for <@${userId}> to sign the attestation`;
     } catch (err) {
-      if (err.data?.error === "already_in_channel") {
-        footer = S.request.alreadyIn(userId);
-      } else {
-        app.logger.error(err);
-        footer = S.request.inviteFailed(err.data?.error ?? err.message);
-      }
+      app.logger.error(err);
+      closeRequest(userId);
+      footer = `:warning: Couldn't send <@${userId}> the attestation (\`${err.data?.error ?? err.message}\`). Buttons removed; follow up manually.`;
     }
   } else {
+    closeRequest(userId);
     footer = S.request.rejected;
   }
 
@@ -144,6 +232,130 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
 
 app.action("approve_request", decide(true));
 app.action("reject_request", decide(false));
+
+app.action("attest_open", async ({ ack, body, action, client, respond }) => {
+  await ack();
+  if (body.user.id !== action.value) return;
+  const pending = getPendingAttestation(action.value);
+  if (!pending) {
+    return respond({ replace_original: true, text: "This approval is no longer valid. Apply again with `/channelrequest`." });
+  }
+  if (pending.review) return;
+  await client.views.open({ trigger_id: body.trigger_id, view: attestModal(action.value) });
+});
+
+const quote = (text) => `>${text.replace(/\n/g, "\n>")}`;
+
+const setDm = (client, pending, text, blocks) =>
+  client.chat.update({
+    channel: pending.dmChannel,
+    ts: pending.dmTs,
+    text,
+    blocks: blocks ?? [{ type: "section", text: { type: "mrkdwn", text } }],
+  });
+
+// Records a signed attestation, adds the user, and tells both sides. `note` explains how it was accepted.
+const finishAttestation = async (client, userId, pending, signed, note) => {
+  recordAttestation(userId, signed);
+
+  let footer;
+  let dmText;
+  try {
+    await client.conversations.invite({ channel: TARGET_CHANNEL, users: userId });
+    footer = `:white_check_mark: Attested — <@${userId}> added to <#${TARGET_CHANNEL}>`;
+    dmText = `:partavocado-approve: Signed! You've been added to <#${TARGET_CHANNEL}>.`;
+  } catch (err) {
+    if (err.data?.error === "already_in_channel") {
+      footer = `:white_check_mark: Attested — <@${userId}> was already in <#${TARGET_CHANNEL}>`;
+      dmText = `:partavocado-approve: Signed! You're already in <#${TARGET_CHANNEL}>.`;
+    } else {
+      app.logger.error(err);
+      footer = `:warning: Attested, but the invite failed (\`${err.data?.error ?? err.message}\`). Add <@${userId}> manually.`;
+      dmText = `Signed! I couldn't add you automatically, so you'll be added manually soon.`;
+    }
+  }
+
+  const results = await Promise.allSettled([
+    client.chat.update({
+      channel: pending.approverChannel,
+      ts: pending.approverTs,
+      text: footer,
+      blocks: requestBlocks(userId, pending.reason, footer),
+    }),
+    client.chat.postMessage({
+      channel: pending.approverChannel,
+      thread_ts: pending.approverTs,
+      reply_broadcast: true,
+      text: `:memo: <@${userId}> signed the attestation (${note}):\n${quote(signed)}`,
+    }),
+    setDm(client, pending, dmText),
+  ]);
+  for (const r of results) if (r.status === "rejected") app.logger.error(r.reason);
+};
+
+app.view("attest_submit", async ({ ack, body, view, client }) => {
+  const userId = body.user.id;
+  const pending = getPendingAttestation(userId);
+  if (!pending || pending.review) {
+    return ack({
+      response_action: "errors",
+      errors: { attest_input: pending ? "Your last attempt is already under review." : "This approval is no longer valid. Apply again with /channelrequest." },
+    });
+  }
+
+  const richText = view.state.values.attest_input.attest_text.rich_text_value;
+  const result = checkAttestation(richText, userId, APPROVER);
+  if (result.status === "fail") return ack({ response_action: "errors", errors: { attest_input: result.error } });
+  await ack();
+
+  const signed = renderAttestation(richText);
+  if (result.status === "pass") {
+    const note = result.typos ? `lax match: ${describeDiffs(result.diffs)}` : "exact match";
+    return finishAttestation(client, userId, pending, signed, note);
+  }
+
+  // Close but not close enough: the approver decides.
+  updatePendingAttestation(userId, { review: { text: signed } });
+  const reviewText = `:mag: <@${userId}>'s attestation doesn't quite match. Differences: ${describeDiffs(result.diffs)}\n${quote(signed)}`;
+  const results = await Promise.allSettled([
+    client.chat.postMessage({
+      channel: pending.approverChannel,
+      thread_ts: pending.approverTs,
+      reply_broadcast: true,
+      text: reviewText,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: reviewText } },
+        buttons(userId, { id: "attest_accept", label: "Accept" }, { id: "attest_reject", label: "Make them retry", danger: true }),
+      ],
+    }),
+    setDm(client, pending, ":hourglass_flowing_sand: Your attestation was close but not exact, so it's been sent to partavocado for review."),
+  ]);
+  for (const r of results) if (r.status === "rejected") app.logger.error(r.reason);
+});
+
+const reviewAttestation = (accepted) => async ({ ack, body, action, client, respond }) => {
+  await ack();
+  if (body.user.id !== APPROVER) return;
+  const userId = action.value;
+  const pending = getPendingAttestation(userId);
+  if (!pending?.review) return respond({ replace_original: true, text: "This attestation is no longer pending." });
+  const { text } = pending.review;
+  updatePendingAttestation(userId, { review: undefined });
+
+  await respond({
+    replace_original: true,
+    text: `${accepted ? ":white_check_mark: Accepted" : ":leftwards_arrow_with_hook: Sent back"} <@${userId}>'s attestation:\n${quote(text)}`,
+  });
+  if (accepted) return finishAttestation(client, userId, pending, text, "accepted on review");
+
+  const retry = attestPrompt(userId);
+  retry.text = `partavocado didn't accept your attestation. Please sign it again, typing it exactly.`;
+  retry.blocks[0].text.text = retry.text;
+  await setDm(client, pending, retry.text, retry.blocks).catch((err) => app.logger.error(err));
+};
+
+app.action("attest_accept", reviewAttestation(true));
+app.action("attest_reject", reviewAttestation(false));
 
 app.message(/^\?(ping|info|build|help)\s*$/i, async ({ message, context, client, say }) => {
   if (message.subtype || message.bot_id) return;
@@ -414,6 +626,7 @@ app.event("member_left_channel", async ({ event, client }) => {
   if (event.channel !== REQUEST_CHANNEL) return;
   botUserId ??= (await client.auth.test()).user_id;
   if (event.user === botUserId) return;
+  closeRequest(event.user);
 
   try {
     await client.conversations.kick({ channel: TARGET_CHANNEL, user: event.user });

@@ -10,7 +10,7 @@ RUN npm ci --omit=dev
 
 COPY src ./src
 RUN mkdir /data && chown node /data
-ENV REMINDERS_FILE=/data/reminders.json
+ENV REMINDERS_FILE=/data/reminders.json ATTESTATIONS_FILE=/data/attestations.json
 VOLUME /data
 
 USER node
