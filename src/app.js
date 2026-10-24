@@ -461,6 +461,23 @@ const defuseBroadcasts = (text) =>
     .replace(/<!(here|channel|everyone)(?:\|[^>]*)?>/g, "@$1")
     .replace(/<!subteam\^[A-Z0-9]+(?:\|@?([^>]*))?>/g, (_, handle) => `@${handle ?? "group"}`);
 
+// Same as defuseBroadcasts, but for rich_text blocks: broadcast/usergroup elements become
+// plain text so the forwarded message keeps its original formatting without pinging anyone.
+const defuseBlocks = (node, groupHandles) => {
+  if (Array.isArray(node)) return node.map((n) => defuseBlocks(n, groupHandles));
+  if (!node || typeof node !== "object") return node;
+  if (node.type === "broadcast") return { type: "text", text: `@${node.range}`, ...(node.style && { style: node.style }) };
+  if (node.type === "usergroup") {
+    return { type: "text", text: `@${groupHandles.get(node.usergroup_id) ?? "group"}`, ...(node.style && { style: node.style }) };
+  }
+  return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, defuseBlocks(v, groupHandles)]));
+};
+
+const hasUsergroup = (node) =>
+  Array.isArray(node)
+    ? node.some(hasUsergroup)
+    : Boolean(node && typeof node === "object" && (node.type === "usergroup" || Object.values(node).some(hasUsergroup)));
+
 app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, say }) => {
   if (message.subtype || message.bot_id) return;
   const thread_ts = message.thread_ts ?? message.ts;
@@ -475,6 +492,12 @@ app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, s
   ]);
   if (!inPublic || !inPrivate) {
     return say({ thread_ts, text: S.digest.notMember });
+  }
+
+  // Without chat:write.customize Slack silently drops username/icon_url and posts as the bot.
+  const { response_metadata } = await client.auth.test();
+  if (!response_metadata?.scopes?.includes("chat:write.customize")) {
+    return say({ thread_ts, text: S.digest.missingScope });
   }
 
   const full = Boolean(context.matches[1]);
@@ -502,12 +525,27 @@ app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, s
     return profiles.get(m.user);
   };
 
+  const groupHandles = new Map();
+  if (toForward.some((m) => hasUsergroup(m.blocks))) {
+    const { usergroups } = await client.usergroups.list();
+    for (const g of usergroups) groupHandles.set(g.id, g.handle);
+  }
+
   let rootTs;
   try {
     for (const m of toForward) {
       const files = (m.files ?? []).map((f) => f.permalink).filter(Boolean);
       const text = [defuseBroadcasts(m.text ?? ""), ...files].filter(Boolean).join("\n") || S.digest.emptyMessage;
-      const res = await client.chat.postMessage({ channel: dest, thread_ts: rootTs, text, ...(await authorOf(m)) });
+      // Reuse the original rich_text blocks so the copy renders exactly like the source message;
+      // file links go in their own section since bots can't re-attach someone else's uploads.
+      const richText = (m.blocks ?? []).filter((b) => b.type === "rich_text");
+      const blocks = richText.length
+        ? [
+            ...defuseBlocks(richText, groupHandles).map(({ block_id, ...b }) => b),
+            ...(files.length ? [{ type: "section", text: { type: "mrkdwn", text: files.join("\n") } }] : []),
+          ]
+        : undefined;
+      const res = await client.chat.postMessage({ channel: dest, thread_ts: rootTs, text, blocks, ...(await authorOf(m)) });
       rootTs ??= res.ts;
     }
   } catch (err) {

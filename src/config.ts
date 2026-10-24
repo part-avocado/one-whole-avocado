@@ -79,6 +79,7 @@ export const digest = {
   emptyMessage: "_(empty message)_",
   botName: "bot",
   failed: (code: string) => `:warning: digest failed (\`${code}\`)`,
+  missingScope: ":warning: digest needs the `chat:write.customize` scope to post as the original author. reinstall the app to grant it",
   done: (count: number, full: boolean, dest: string, permalink: string) =>
     `:partavocado-approve: digested ${full ? `${count} messages` : "the first message"} to <#${dest}> (<${permalink}|view>)`,
 };
