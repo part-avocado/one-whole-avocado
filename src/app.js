@@ -17,6 +17,7 @@ import {
   updatePendingAttestation,
 } from "./attest.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
+import { forgetDigest, getDigest, recordForwarded } from "./digests.js";
 import { REQUEST_CHANNEL, TARGET_CHANNEL, APPROVER, PING_GROUP_ID } from "./config.ts";
 import * as S from "./config.ts";
 
@@ -478,39 +479,47 @@ const hasUsergroup = (node) =>
     ? node.some(hasUsergroup)
     : Boolean(node && typeof node === "object" && (node.type === "usergroup" || Object.values(node).some(hasUsergroup)));
 
-app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, say }) => {
-  if (message.subtype || message.bot_id) return;
-  const thread_ts = message.thread_ts ?? message.ts;
+const DIGEST_COMMAND = /^\?digest(?:\s+full)?\s*$/i;
+// Marks the bot's own replies to ?digest so a later full digest doesn't forward them.
+const RECEIPT = { event_type: "digest_receipt", event_payload: { v: 1 } };
 
-  const dest = { [REQUEST_CHANNEL]: TARGET_CHANNEL, [TARGET_CHANNEL]: REQUEST_CHANNEL }[message.channel];
-  if (!dest) return say({ thread_ts, text: S.digest.wrongChannel });
-  if (!message.thread_ts) return say({ thread_ts, text: S.digest.notThread });
-
-  const [inPublic, inPrivate] = await Promise.all([
-    isMember(client, REQUEST_CHANNEL, message.user),
-    isMember(client, TARGET_CHANNEL, message.user),
-  ]);
-  if (!inPublic || !inPrivate) {
-    return say({ thread_ts, text: S.digest.notMember });
+const threadExists = async (client, channel, ts) => {
+  try {
+    const { messages } = await client.conversations.replies({ channel, ts, limit: 1 });
+    return messages?.[0]?.ts === ts && messages[0].subtype !== "tombstone";
+  } catch (err) {
+    if (["thread_not_found", "message_not_found"].includes(err.data?.error)) return false;
+    throw err;
   }
+};
 
-  // Without chat:write.customize Slack silently drops username/icon_url and posts as the bot.
-  const { response_metadata } = await client.auth.test();
-  if (!response_metadata?.scopes?.includes("chat:write.customize")) {
-    return say({ thread_ts, text: S.digest.missingScope });
-  }
-
-  const full = Boolean(context.matches[1]);
+// Copies the thread (or just its first message) into dest. Digesting the same thread again in the
+// same mode reuses the earlier destination thread: a plain digest re-posts the first message there
+// (picking up edits), a full digest forwards only messages that haven't been forwarded yet.
+// Returns { replies, count, rootTs, lastTs, repeat }, where replies is every source message fetched.
+const forwardThread = async (client, message, dest, full) => {
   const replies = [];
-  for await (const page of client.paginate("conversations.replies", { channel: message.channel, ts: message.thread_ts })) {
+  for await (const page of client.paginate("conversations.replies", {
+    channel: message.channel,
+    ts: message.thread_ts,
+    include_all_metadata: true,
+  })) {
     replies.push(...page.messages);
     if (!full) break;
   }
-  const toForward = (full ? replies : replies.slice(0, 1)).filter(
-    (m) => !(m.user && /^\?digest(?:\s+full)?\s*$/i.test(m.text ?? "")),
-  );
 
-  if (!toForward.length) return say({ thread_ts, text: S.digest.nothing });
+  let existing = getDigest(message.channel, message.thread_ts, full);
+  if (existing && !(await threadExists(client, existing.dest, existing.rootTs))) {
+    forgetDigest(message.channel, message.thread_ts, full);
+    existing = undefined;
+  }
+
+  const toForward = (full ? replies : replies.slice(0, 1)).filter(
+    (m) =>
+      !(m.user && DIGEST_COMMAND.test(m.text ?? "")) &&
+      m.metadata?.event_type !== RECEIPT.event_type &&
+      !(full && existing?.forwarded.includes(m.ts)),
+  );
 
   const profiles = new Map();
   const authorOf = async (m) => {
@@ -531,33 +540,61 @@ app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, s
     for (const g of usergroups) groupHandles.set(g.id, g.handle);
   }
 
-  let rootTs;
-  try {
-    for (const m of toForward) {
-      const files = (m.files ?? []).map((f) => f.permalink).filter(Boolean);
-      const text = [defuseBroadcasts(m.text ?? ""), ...files].filter(Boolean).join("\n") || S.digest.emptyMessage;
-      // Reuse the original rich_text blocks so the copy renders exactly like the source message;
-      // file links go in their own section since bots can't re-attach someone else's uploads.
-      const richText = (m.blocks ?? []).filter((b) => b.type === "rich_text");
-      const blocks = richText.length
-        ? [
-            ...defuseBlocks(richText, groupHandles).map(({ block_id, ...b }) => b),
-            ...(files.length ? [{ type: "section", text: { type: "mrkdwn", text: files.join("\n") } }] : []),
-          ]
-        : undefined;
-      const res = await client.chat.postMessage({ channel: dest, thread_ts: rootTs, text, blocks, ...(await authorOf(m)) });
-      rootTs ??= res.ts;
-    }
-  } catch (err) {
-    app.logger.error(err);
-    return say({ thread_ts, text: S.digest.failed(err.data?.error ?? err.message) });
+  let rootTs = existing?.rootTs;
+  let lastTs;
+  for (const m of toForward) {
+    const files = (m.files ?? []).map((f) => f.permalink).filter(Boolean);
+    const text = [defuseBroadcasts(m.text ?? ""), ...files].filter(Boolean).join("\n") || S.digest.emptyMessage;
+    // Reuse the original rich_text blocks so the copy renders exactly like the source message;
+    // file links go in their own section since bots can't re-attach someone else's uploads.
+    const richText = (m.blocks ?? []).filter((b) => b.type === "rich_text");
+    const blocks = richText.length
+      ? [
+          ...defuseBlocks(richText, groupHandles).map(({ block_id, ...b }) => b),
+          ...(files.length ? [{ type: "section", text: { type: "mrkdwn", text: files.join("\n") } }] : []),
+        ]
+      : undefined;
+    const res = await client.chat.postMessage({ channel: dest, thread_ts: rootTs, text, blocks, ...(await authorOf(m)) });
+    rootTs ??= res.ts;
+    lastTs = res.ts;
+    // Recorded per message so a digest that fails partway resumes where it stopped.
+    recordForwarded(message.channel, message.thread_ts, full, dest, rootTs, m.ts);
   }
 
-  const { permalink } = await client.chat.getPermalink({ channel: dest, message_ts: rootTs });
-  return say({
-    thread_ts,
-    text: S.digest.done(toForward.length, full, dest, permalink),
-  });
+  return { replies, count: toForward.length, rootTs, lastTs, repeat: Boolean(existing) };
+};
+
+app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, say }) => {
+  if (message.subtype || message.bot_id) return;
+  const thread_ts = message.thread_ts ?? message.ts;
+  const reply = (text) => say({ thread_ts, text, metadata: RECEIPT });
+
+  const dest = { [REQUEST_CHANNEL]: TARGET_CHANNEL, [TARGET_CHANNEL]: REQUEST_CHANNEL }[message.channel];
+  if (!dest) return reply(S.digest.wrongChannel);
+  if (!message.thread_ts) return reply(S.digest.notThread);
+
+  const [inPublic, inPrivate] = await Promise.all([
+    isMember(client, REQUEST_CHANNEL, message.user),
+    isMember(client, TARGET_CHANNEL, message.user),
+  ]);
+  if (!inPublic || !inPrivate) return reply(S.digest.notMember);
+
+  // Without chat:write.customize Slack silently drops username/icon_url and posts as the bot.
+  const { response_metadata } = await client.auth.test();
+  if (!response_metadata?.scopes?.includes("chat:write.customize")) return reply(S.digest.missingScope);
+
+  const full = Boolean(context.matches[1]);
+  let result;
+  try {
+    result = await forwardThread(client, message, dest, full);
+  } catch (err) {
+    app.logger.error(err);
+    return reply(S.digest.failed(err.data?.error ?? err.message));
+  }
+  if (!result.count) return reply(result.repeat ? S.digest.nothingNew : S.digest.nothing);
+
+  const { permalink } = await client.chat.getPermalink({ channel: dest, message_ts: result.lastTs });
+  return reply(S.digest.done(result.count, full, dest, permalink, result.repeat));
 });
 
 startReminders(

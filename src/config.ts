@@ -39,7 +39,7 @@ export const help = [
   "@ `?time -a` - list your active reminders (with ids)",
   "@ `?time <id> delete` - cancel one of your reminders (`cancel` works too). `?time delete` alone removes your latest",
   `@ \`?digest\` - in a thread, forwards its first message to the other avocado channel as the original poster (members of both <#${REQUEST_CHANNEL}> and n-plus-one-parts-of-an-avocado only)`,
-  "@ `?digest full` - same, but forwards the whole thread",
+  "@ `?digest full` - same, but forwards the whole thread. digesting a thread again posts into the same copy (full only sends new messages)",
   "@ `?help` - this message",
   "",
   "*slash commands*:",
@@ -76,12 +76,13 @@ export const digest = {
   notThread: "run `?digest` in a thread to forward it",
   notMember: "you need to be in both channels to digest threads",
   nothing: "there's nothing in this thread to digest",
+  nothingNew: "everything in this thread has already been digested",
   emptyMessage: "_(empty message)_",
   botName: "bot",
   failed: (code: string) => `:warning: digest failed (\`${code}\`)`,
   missingScope: ":warning: digest needs the `chat:write.customize` scope to post as the original author. reinstall the app to grant it",
-  done: (count: number, full: boolean, dest: string, permalink: string) =>
-    `:partavocado-approve: digested ${full ? `${count} messages` : "the first message"} to <#${dest}> (<${permalink}|view>)`,
+  done: (count: number, full: boolean, dest: string, permalink: string, repeat: boolean) =>
+    `:partavocado-approve: digested ${full ? `${count} message${count === 1 ? "" : "s"}` : "the first message"} to ${repeat ? "the existing thread in " : ""}<#${dest}> (<${permalink}|view>)`,
 };
 
 // ---- joining / leaving ----
