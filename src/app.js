@@ -3,18 +3,11 @@ import bolt from "@slack/bolt";
 import { gatherInfo } from "./info.js";
 import { gatherBuild, trackErrors, deployInfo } from "./build.js";
 import { parseTime } from "./time.js";
-import { addPending, allPending, countMessage, removePending } from "./rules.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
+import { REQUEST_CHANNEL, TARGET_CHANNEL, APPROVER, PING_GROUP_ID } from "./config.ts";
+import * as S from "./config.ts";
 
 const { App, LogLevel } = bolt;
-
-const REQUEST_CHANNEL = "C0C26M2E3FT"; 
-const TARGET_CHANNEL = "C0C962U4JSW";
-const APPROVER = "U0A06EPFV45";
-const PING_GROUP_ID = "S0C9DFYS90T";
-const PING_GROUP_HANDLE = "cutavocados";
-const NDA_API = "https://nda.hackclub.com/api/v1/nda_status";
-const RULES_URL = "https://hackclub.enterprise.slack.com/docs/T0266FRGM/F0C9ML51CTB";
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -28,17 +21,31 @@ trackErrors(app.logger);
 const escapeMrkdwn = (s) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-const requestBlocks = (userId, reason, footer, ndaUnverified) => [
+// User/channel/usergroup mentions and links (incl. message permalinks) pass through; @here/@channel/@everyone become @/here etc.
+const SLACK_TOKEN = /(<(?:@[UW][A-Z0-9]+|#C[A-Z0-9]+|!subteam\^S[A-Z0-9]+|https?:\/\/[^\s<>|]+)(?:\|[^<>]*)?>)/;
+
+// Like escapeMrkdwn, but keeps SLACK_TOKEN links clickable and doesn't re-encode entities Slack already sent.
+const escapeKeepLinks = (s) =>
+  s
+    .split(SLACK_TOKEN)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part
+            .replace(/<!(here|channel|everyone)(?:\|[^<>]*)?>/g, "@/$1")
+            .replace(/@(here|channel|everyone)\b/g, "@/$1")
+            .replace(/&(?!amp;|lt;|gt;)/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;"),
+    )
+    .join("");
+
+const requestBlocks = (userId, reason, footer) => [
   {
     type: "section",
     text: {
       type: "mrkdwn",
-      text:
-        `:door: *Channel access request*\n` +
-        `*User:* <@${userId}> (\`${userId}\`)\n` +
-        `*Ping:* <@${userId}>\n` +
-        (ndaUnverified ? `:warning: *NDA status could not be verified* — please check manually.\n` : "") +
-        `*Reason:*\n>${escapeMrkdwn(reason).replace(/\n/g, "\n>")}`,
+      text: S.request.body(userId, escapeMrkdwn(reason).replace(/\n/g, "\n>")),
     },
   },
   footer
@@ -49,27 +56,20 @@ const requestBlocks = (userId, reason, footer, ndaUnverified) => [
           {
             type: "button",
             action_id: "approve_request",
-            text: { type: "plain_text", text: "Approve" },
+            text: { type: "plain_text", text: S.request.approveButton },
             style: "primary",
-            value: JSON.stringify({ userId, reason, ndaUnverified }),
+            value: JSON.stringify({ userId, reason }),
           },
           {
             type: "button",
             action_id: "reject_request",
-            text: { type: "plain_text", text: "Reject" },
+            text: { type: "plain_text", text: S.request.rejectButton },
             style: "danger",
-            value: JSON.stringify({ userId, reason, ndaUnverified }),
+            value: JSON.stringify({ userId, reason }),
           },
         ],
       },
 ];
-
-// Legacy signatures are valid agreements, so any "signed" status passes.
-const hasSignedNda = async (slackId) => {
-  const res = await fetch(`${NDA_API}/${encodeURIComponent(slackId)}`);
-  if (!res.ok) throw new Error(`NDA API returned ${res.status}`);
-  return (await res.json()).status === "signed";
-};
 
 app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   await ack();
@@ -77,7 +77,7 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   if (command.channel_id !== REQUEST_CHANNEL) {
     return respond({
       response_type: "ephemeral",
-      text: "This command can't be used here.",
+      text: S.request.wrongChannel,
     });
   }
 
@@ -85,42 +85,28 @@ app.command("/channelrequest", async ({ command, ack, client, respond }) => {
   if (!reason) {
     return respond({
       response_type: "ephemeral",
-      text: "Please include a reason: `/channelrequest <reason>`",
+      text: S.request.noReason,
     });
-  }
-
-  let ndaUnverified = false;
-  try {
-    if (!(await hasSignedNda(command.user_id))) {
-      return respond({
-        response_type: "ephemeral",
-        text: "woah! you need to sign the NDA to do that... You can do so at nda.hackclub.com!",
-      });
-    }
-  } catch (err) {
-    // Fail open: the approver makes the final call, so flag it instead of blocking.
-    app.logger.error(err);
-    ndaUnverified = true;
   }
 
   try {
     const { channel } = await client.conversations.open({ users: APPROVER });
     await client.chat.postMessage({
       channel: channel.id,
-      text: `Channel access request from <@${command.user_id}>`,
-      blocks: requestBlocks(command.user_id, reason, undefined, ndaUnverified),
+      text: S.request.notification(command.user_id),
+      blocks: requestBlocks(command.user_id, reason),
     });
   } catch (err) {
     app.logger.error(err);
     return respond({
       response_type: "ephemeral",
-      text: `:warning: Couldn't deliver your request (\`${err.data?.error ?? err.message}\`). Please try again later.`,
+      text: S.request.deliverFailed(err.data?.error ?? err.message),
     });
   }
 
   return respond({
     response_type: "ephemeral",
-    text: "Your request has been submitted.",
+    text: S.request.submitted,
   });
 });
 
@@ -129,52 +115,35 @@ const decide = (approved) => async ({ ack, body, action, client }) => {
 
   if (body.user.id !== APPROVER) return;
 
-  const { userId, reason, ndaUnverified } = JSON.parse(action.value);
+  const { userId, reason } = JSON.parse(action.value);
   let footer;
 
   if (approved) {
     try {
       await client.conversations.invite({ channel: TARGET_CHANNEL, users: userId });
-      footer = `:white_check_mark: Approved — <@${userId}> added to <#${TARGET_CHANNEL}>`;
+      footer = S.request.approved(userId);
     } catch (err) {
       if (err.data?.error === "already_in_channel") {
-        footer = `:white_check_mark: Approved — <@${userId}> was already in <#${TARGET_CHANNEL}>`;
+        footer = S.request.alreadyIn(userId);
       } else {
         app.logger.error(err);
-        footer = `:warning: Invite failed (\`${err.data?.error ?? err.message}\`). Buttons removed; retry manually.`;
+        footer = S.request.inviteFailed(err.data?.error ?? err.message);
       }
     }
   } else {
-    footer = ":x: Rejected — the user was not notified.";
+    footer = S.request.rejected;
   }
 
   await client.chat.update({
     channel: body.channel.id,
     ts: body.message.ts,
     text: footer,
-    blocks: requestBlocks(userId, reason, footer, ndaUnverified),
+    blocks: requestBlocks(userId, reason, footer),
   });
 };
 
 app.action("approve_request", decide(true));
 app.action("reject_request", decide(false));
-
-const HELP = [
-  "*commands* (send as a message in any channel i'm in):",
-  "@ `?ping` - slack api + event delivery latency",
-  "@ `?info` - runtime details",
-  "@ `?build` - build details",
-  "@ `?time <reminder>` - timepheus v2! sets a reminder in plain english, e.g. `?time check on fd apps tomorrow at 2pm`. uses localtime",
-  "@ `?time -a` - list your active reminders (with ids)",
-  "@ `?time <id> delete` - cancel one of your reminders (`cancel` works too). `?time delete` alone removes your latest",
-  "@ `?help` - this message",
-  "",
-  "*slash commands*:",
-  `@ \`/channelrequest <reason>\` - request access to n-plus-one-parts-of-an-avocado (only usable in <#${REQUEST_CHANNEL}>)`,
-  "",
-  "*automatic*:",
-  `@ leaving <#${REQUEST_CHANNEL}> removes you from n-plus-one-parts-of-an-avocado`,
-].join("\n");
 
 app.message(/^\?(ping|info|build|help)\s*$/i, async ({ message, context, client, say }) => {
   if (message.subtype || message.bot_id) return;
@@ -189,11 +158,11 @@ app.message(/^\?(ping|info|build|help)\s*$/i, async ({ message, context, client,
     const api = Math.round(performance.now() - t0);
     return say({
       thread_ts,
-      text: `:partavocado-approve: Pong! Slack API RT Delay: *${api} ms* @ event delivery: *${Math.round(eventLag)} ms*`,
+      text: S.pong(api, Math.round(eventLag)),
     });
   }
 
-  if (cmd === "help") return say({ thread_ts, text: HELP });
+  if (cmd === "help") return say({ thread_ts, text: S.help });
 
   if (cmd === "build") return say({ thread_ts, text: "```\n" + gatherBuild() + "\n```" });
 
@@ -213,9 +182,9 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     const tz = user.tz ?? "UTC";
     const fmt = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: tz });
     const mine = listReminders(message.user);
-    if (!mine.length) return say({ thread_ts, text: "you have no active reminders" });
-    const lines = mine.map((r) => `\`${r.id}\` — ${fmt.format(r.at)} — ${escapeMrkdwn(r.message)}`);
-    return say({ thread_ts, text: `your active reminders (${tz}):\n${lines.join("\n")}\n_cancel one with \`?time <id> delete\`_` });
+    if (!mine.length) return say({ thread_ts, text: S.time.noReminders });
+    const lines = mine.map((r) => S.time.listLine(r.id, fmt.format(r.at), escapeKeepLinks(r.message)));
+    return say({ thread_ts, text: S.time.list(tz, lines) });
   }
 
   const del = text.match(/^(?:(\d+)\s+(?:delete|cancel)|(?:delete|cancel)\s+(\d+))$/i);
@@ -224,14 +193,14 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     const r = deleteReminder(Number(id), message.user);
     return say({
       thread_ts,
-      text: r ? `deleted reminder \`${r.id}\`\n> ${escapeMrkdwn(r.message)}` : `i couldn't find a reminder of yours with id \`${id}\``,
+      text: r ? S.time.deleted(r.id, escapeKeepLinks(r.message)) : S.time.notFound(id),
     });
   }
   if (/^(?:delete|cancel)$/i.test(text)) {
     const r = deleteReminder(undefined, message.user);
     return say({
       thread_ts,
-      text: r ? `deleted your latest reminder \`${r.id}\`\n> ${escapeMrkdwn(r.message)}` : "you have no active reminders",
+      text: r ? S.time.deletedLatest(r.id, escapeKeepLinks(r.message)) : S.time.noReminders,
     });
   }
 
@@ -245,7 +214,7 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     const result = await parseTime(text, { tz: user.tz ?? "UTC", tzOffset: user.tz_offset ?? 0 });
     const at = Date.parse(`${result.date}T${result.time}:00Z`);
     if (Number.isNaN(at) || at <= Date.now()) {
-      return say({ thread_ts, text: "that time is already in the past, so i can't remind you :(" });
+      return say({ thread_ts, text: S.time.inPast });
     }
     const { id } = addReminder({ at, user: message.user, channel: message.channel, thread_ts, message: result.message });
 
@@ -254,14 +223,91 @@ app.message(/^\?time\s+([\s\S]+)$/i, async ({ message, context, client, say }) =
     const timeStr = new Intl.DateTimeFormat("en-US", { timeStyle: "short", timeZone: tz }).format(at);
     await say({
       thread_ts,
-      text: `got it! i'll remind you on ${dateStr} @ ${timeStr} (${tz}) [id \`${id}\`]\n> ${escapeMrkdwn(result.message)}`,
+      text: S.time.set(dateStr, timeStr, tz, id, escapeKeepLinks(result.message)),
     });
     await react("remove", "eyes_shaking");
     await react("add", "oke");
   } catch (err) {
     app.logger.error(err);
-    return say({ thread_ts, text: "oopsies! i couldn't parse that" });
+    return say({ thread_ts, text: S.time.parseFailed });
   }
+});
+
+// ---- ?digest [full]: mirror a thread into the other avocado channel ----
+
+const isMember = async (client, channel, user) => {
+  for await (const page of client.paginate("conversations.members", { channel, limit: 1000 })) {
+    if (page.members.includes(user)) return true;
+  }
+  return false;
+};
+
+// Plain-text "@here"/"@handle" don't notify when posted without link_names, so forwarded
+// messages can't mass-ping the destination channel.
+const defuseBroadcasts = (text) =>
+  text
+    .replace(/<!(here|channel|everyone)(?:\|[^>]*)?>/g, "@$1")
+    .replace(/<!subteam\^[A-Z0-9]+(?:\|@?([^>]*))?>/g, (_, handle) => `@${handle ?? "group"}`);
+
+app.message(/^\?digest(?:\s+(full))?\s*$/i, async ({ message, context, client, say }) => {
+  if (message.subtype || message.bot_id) return;
+  const thread_ts = message.thread_ts ?? message.ts;
+
+  const dest = { [REQUEST_CHANNEL]: TARGET_CHANNEL, [TARGET_CHANNEL]: REQUEST_CHANNEL }[message.channel];
+  if (!dest) return say({ thread_ts, text: S.digest.wrongChannel });
+  if (!message.thread_ts) return say({ thread_ts, text: S.digest.notThread });
+
+  const [inPublic, inPrivate] = await Promise.all([
+    isMember(client, REQUEST_CHANNEL, message.user),
+    isMember(client, TARGET_CHANNEL, message.user),
+  ]);
+  if (!inPublic || !inPrivate) {
+    return say({ thread_ts, text: S.digest.notMember });
+  }
+
+  const full = Boolean(context.matches[1]);
+  const replies = [];
+  for await (const page of client.paginate("conversations.replies", { channel: message.channel, ts: message.thread_ts })) {
+    replies.push(...page.messages);
+    if (!full) break;
+  }
+  const toForward = (full ? replies : replies.slice(0, 1)).filter(
+    (m) => !(m.user && /^\?digest(?:\s+full)?\s*$/i.test(m.text ?? "")),
+  );
+
+  if (!toForward.length) return say({ thread_ts, text: S.digest.nothing });
+
+  const profiles = new Map();
+  const authorOf = async (m) => {
+    if (!m.user) return { username: m.username ?? m.bot_profile?.name ?? S.digest.botName, icon_url: m.bot_profile?.icons?.image_72 };
+    if (!profiles.has(m.user)) {
+      const { user } = await client.users.info({ user: m.user });
+      profiles.set(m.user, {
+        username: user.profile.display_name || user.real_name || user.name,
+        icon_url: user.profile.image_192 ?? user.profile.image_72,
+      });
+    }
+    return profiles.get(m.user);
+  };
+
+  let rootTs;
+  try {
+    for (const m of toForward) {
+      const files = (m.files ?? []).map((f) => f.permalink).filter(Boolean);
+      const text = [defuseBroadcasts(m.text ?? ""), ...files].filter(Boolean).join("\n") || S.digest.emptyMessage;
+      const res = await client.chat.postMessage({ channel: dest, thread_ts: rootTs, text, ...(await authorOf(m)) });
+      rootTs ??= res.ts;
+    }
+  } catch (err) {
+    app.logger.error(err);
+    return say({ thread_ts, text: S.digest.failed(err.data?.error ?? err.message) });
+  }
+
+  const { permalink } = await client.chat.getPermalink({ channel: dest, message_ts: rootTs });
+  return say({
+    thread_ts,
+    text: S.digest.done(toForward.length, full, dest, permalink),
+  });
 });
 
 startReminders(
@@ -269,19 +315,20 @@ startReminders(
     app.client.chat.postMessage({
       channel,
       thread_ts,
-      text: `:alarm_clock: <@${user}> reminder: ${escapeMrkdwn(message)}`,
+      text: S.time.fire(user, escapeKeepLinks(message)),
     }),
   app.logger,
 );
 
+// Serialized so concurrent read-modify-write updates of the member list don't clobber each other.
 let groupQueue = Promise.resolve();
-const addToGroup = (client, userId) => {
+const updateGroup = (client, userId, add) => {
   const job = groupQueue.then(async () => {
     const { users } = await client.usergroups.users.list({ usergroup: PING_GROUP_ID });
-    if (users.includes(userId)) return;
+    if (users.includes(userId) === add) return;
     await client.usergroups.users.update({
       usergroup: PING_GROUP_ID,
-      users: [...users, userId].join(","),
+      users: (add ? [...users, userId] : users.filter((u) => u !== userId)).join(","),
     });
   });
   groupQueue = job.catch(() => {});
@@ -308,100 +355,65 @@ const buttons = (userId, yes, no) => ({
   ],
 });
 
-const rulesMessage = (userId) => {
-  const text =
-    `Hiya! <@${userId}>! Before you continue, please read the <${RULES_URL}|channel rules>.\n\n` +
-    `*Do you agree to follow aforementioned rules?* If you do not consent, you will be removed from this channel.`;
+const rulesNotice = () => textMessage(S.join.rulesNotice);
+
+const announcePrompt = (userId) => {
+  const text = S.join.announcePrompt;
   return {
     text,
     blocks: [
       { type: "section", text: { type: "mrkdwn", text } },
-      buttons(userId, { id: "rules_agree", label: "I agree" }, { id: "rules_decline", label: "I do not agree", danger: true }),
+      buttons(userId, { id: "announce_yes", label: S.join.announceYes }, { id: "announce_no", label: S.join.announceNo }),
     ],
   };
 };
 
-const groupMessage = (userId) => {
-  const text = `Thanks! Would you like to also join the ping group @${PING_GROUP_HANDLE}? (I don't ping a lot)`;
+const textMessage = (text) => ({ text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] });
+
+// Ping group membership is opt-out: joining REQUEST_CHANNEL adds you, with a button to leave.
+// The public version (mention = true) can't ping the group, and its button works for whoever clicks it.
+const groupMessage = (userId, mention = false) => {
+  const text = mention ? S.pingGroup.addedPublic(userId) : S.pingGroup.added;
   return {
     text,
     blocks: [
       { type: "section", text: { type: "mrkdwn", text } },
-      buttons(userId, { id: "pinggroup_yes", label: "Yes" }, { id: "pinggroup_no", label: "No" }),
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            action_id: "pinggroup_leave",
+            text: { type: "plain_text", text: S.pingGroup.leaveButton },
+            value: mention ? "*" : userId,
+          },
+        ],
+      },
     ],
   };
 };
 
 let botUserId;
 
-// Users who joined REQUEST_CHANNEL and haven't answered the rules prompt yet. State lives in
-// rules.js (persisted); the timers here are rebuilt from it on startup.
-const RULES_TIMEOUT_MS = 60 * 60 * 1000;
-const RULES_MAX_MESSAGES = 15;
-const ruleTimers = new Map();
-
-const clearPending = (userId) => {
-  clearTimeout(ruleTimers.get(userId));
-  ruleTimers.delete(userId);
-  removePending(userId);
-};
-
-const scheduleKick = (client, userId, delay) => {
-  clearTimeout(ruleTimers.get(userId));
-  ruleTimers.set(
-    userId,
-    setTimeout(() => kickForRules(client, userId).catch((err) => app.logger.error(err)), Math.max(0, delay)),
-  );
-};
-
-const kickForRules = async (client, userId) => {
-  clearPending(userId);
-  try {
-    await client.conversations.kick({ channel: REQUEST_CHANNEL, user: userId });
-  } catch (err) {
-    if (err.data?.error === "not_in_channel") return;
-    app.logger.error(err);
-    await client.chat
-      .postMessage({
-        channel: APPROVER,
-        text: `:warning: <@${userId}> didn't accept the rules in <#${REQUEST_CHANNEL}> but I couldn't remove them (\`${err.data?.error ?? err.message}\`). Please remove them manually.`,
-      })
-      .catch(() => {});
-    return;
-  }
-  await client.chat
-    .postMessage({
-      channel: (await client.conversations.open({ users: userId })).channel.id,
-      text: `You did not accept the rules >:( You can join back again <#${REQUEST_CHANNEL}>`,
-    })
-    .catch((err) => app.logger.error(err));
-};
-
-app.message(async ({ message, client }) => {
-  if (message.channel !== REQUEST_CHANNEL || !message.user) return;
-  if (countMessage(message.user) > RULES_MAX_MESSAGES) await kickForRules(client, message.user);
-});
+const AVOCADO_CHANNELS = [REQUEST_CHANNEL, TARGET_CHANNEL];
 
 app.event("member_joined_channel", async ({ event, client }) => {
-  if (event.channel !== REQUEST_CHANNEL) return;
+  if (!AVOCADO_CHANNELS.includes(event.channel)) return;
   botUserId ??= (await client.auth.test()).user_id;
   if (event.user === botUserId) return;
 
-  await client.chat.postEphemeral({
-    channel: REQUEST_CHANNEL,
-    user: event.user,
-    ...rulesMessage(event.user),
-  });
+  await client.chat.postEphemeral({ channel: event.channel, user: event.user, ...rulesNotice() });
+  await client.chat.postEphemeral({ channel: event.channel, user: event.user, ...announcePrompt(event.user) });
 
-  addPending(event.user);
-  scheduleKick(client, event.user, RULES_TIMEOUT_MS);
+  if (event.channel === REQUEST_CHANNEL) {
+    await updateGroup(client, event.user, true).catch((err) => app.logger.error(err));
+  }
 });
 
 app.event("member_left_channel", async ({ event, client }) => {
   if (event.channel !== REQUEST_CHANNEL) return;
   botUserId ??= (await client.auth.test()).user_id;
   if (event.user === botUserId) return;
-  clearPending(event.user);
 
   try {
     await client.conversations.kick({ channel: TARGET_CHANNEL, user: event.user });
@@ -411,7 +423,7 @@ app.event("member_left_channel", async ({ event, client }) => {
     await client.chat
       .postMessage({
         channel: (await client.conversations.open({ users: APPROVER })).channel.id,
-        text: `:warning: <@${event.user}> left <#${REQUEST_CHANNEL}> but I couldn't remove them from <#${TARGET_CHANNEL}> (\`${err.data?.error ?? err.message}\`). Please remove them manually.`,
+        text: S.join.kickFailed(event.user, err.data?.error ?? err.message),
       })
       .catch(() => {});
   }
@@ -419,68 +431,61 @@ app.event("member_left_channel", async ({ event, client }) => {
 
 const ownButton = (body, action) => body.user.id === action.value;
 
-app.action("rules_agree", async ({ ack, body, action, respond }) => {
-  await ack();
-  if (!ownButton(body, action)) return;
-  clearPending(action.value);
-  await respond({ replace_original: true, ...groupMessage(action.value) });
-});
+// Private joiners of REQUEST_CHANNEL see the ping group opt-out in place of the prompt; announced
+// ones get it posted publicly instead (see announce_yes).
+const announceAnswered = (channel, userId) =>
+  channel === REQUEST_CHANNEL ? groupMessage(userId) : { delete_original: true };
 
-app.action("rules_decline", async ({ ack, body, action, client, respond }) => {
+app.action("announce_yes", async ({ ack, body, action, client, respond }) => {
   await ack();
   if (!ownButton(body, action)) return;
-  clearPending(action.value);
+  const userId = action.value;
   try {
-    await client.conversations.kick({ channel: REQUEST_CHANNEL, user: action.value });
-    await respond({ delete_original: true });
+    await client.chat.postMessage({
+      channel: body.channel.id,
+      text: S.join.welcome(userId),
+    });
+    if (body.channel.id === REQUEST_CHANNEL) {
+      await client.chat.postMessage({ channel: REQUEST_CHANNEL, ...groupMessage(userId, true) });
+    }
   } catch (err) {
     app.logger.error(err);
-    await respond({
+    return respond({
       replace_original: true,
-      text: `:oh: I couldn't remove you automatically (\`${err.data?.error ?? err.message}\`). You will be executed shortly.`,
+      ...textMessage(S.join.announceFailed(err.data?.error ?? err.message)),
     });
-    await client.chat
-      .postMessage({
-        channel: APPROVER,
-        text: `:warning: <@${action.value}> declined the rules in <#${REQUEST_CHANNEL}> but I couldn't remove them (\`${err.data?.error ?? err.message}\`). Please remove them manually.`,
-      })
-      .catch(() => {});
   }
+  await respond({ delete_original: true });
 });
 
-app.action("pinggroup_yes", async ({ ack, body, action, client, respond }) => {
+app.action("announce_no", async ({ ack, body, action, respond }) => {
   await ack();
   if (!ownButton(body, action)) return;
+  await respond({ replace_original: true, ...announceAnswered(body.channel.id, action.value) });
+});
+
+app.action("pinggroup_leave", async ({ ack, body, action, client, respond }) => {
+  await ack();
+  const isPublic = action.value === "*";
+  if (!isPublic && !ownButton(body, action)) return;
   let text;
   try {
-    await addToGroup(client, action.value);
-    text = `:partavocado-approve: You've been added to @${PING_GROUP_HANDLE}.`;
+    await updateGroup(client, body.user.id, false);
+    text = S.pingGroup.left;
   } catch (err) {
     app.logger.error(err);
-    text = `:warning: Couldn't add you to @${PING_GROUP_HANDLE} (\`${err.data?.error ?? err.message}\`).`;
+    text = S.pingGroup.leaveFailed(err.data?.error ?? err.message);
   }
-  await respond({
-    replace_original: true,
-    text,
-    blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
-  });
-});
-
-app.action("pinggroup_no", async ({ ack, body, action, respond }) => {
-  await ack();
-  if (!ownButton(body, action)) return;
-  await respond({ delete_original: true });
+  // Leave the public message intact for everyone else; only the clicker sees the result.
+  if (isPublic) {
+    await client.chat.postEphemeral({ channel: body.channel.id, user: body.user.id, ...textMessage(text) });
+  } else {
+    await respond({ replace_original: true, ...textMessage(text) });
+  }
 });
 
 await app.start();
 console.log("socket mode is running!");
-
-// Resume rules deadlines that were pending before a restart (overdue ones are kicked right away).
-app.client.token ??= process.env.SLACK_BOT_TOKEN;
-for (const { userId, joinedAt, messages } of allPending()) {
-  if (messages > RULES_MAX_MESSAGES) await kickForRules(app.client, userId);
-  else scheduleKick(app.client, userId, joinedAt + RULES_TIMEOUT_MS - Date.now());
-}
 
 // Announce new deploys in the private channel. The commit is stored in message metadata so
 // restarts/crash loops of the same commit don't repeat the announcement.
@@ -501,7 +506,7 @@ const announceDeploy = async () => {
   await app.client.chat.postMessage({
     token: process.env.SLACK_BOT_TOKEN,
     channel: TARGET_CHANNEL,
-    text: `new version deployed: ${version}\n${escapeMrkdwn(commitMessage || commit)}`,
+    text: S.deployed(version, escapeMrkdwn(commitMessage || commit)),
     metadata: { event_type: "deploy", event_payload: { commit } },
   });
 };

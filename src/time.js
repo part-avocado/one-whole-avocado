@@ -34,6 +34,7 @@ const systemPrompt = (now, tz, offsetSec) =>
     "Times the user states are in their local timezone. Convert them to UTC: date is YYYY-MM-DD and time is HH:MM (24h), both UTC, and the date must be the UTC date after conversion.",
     "If no time of day is given for a date, use 09:00 user-local, converted to UTC.",
     "message is the user's wording verbatim, minus only the scheduling words (e.g. \"remind me in 15 days to check on the dog\" -> \"check on the dog\"). Do not paraphrase.",
+    "Copy Slack tokens in angle brackets exactly as written, brackets included: mentions like <@U123ABC>, <#C123ABC|general> or <!subteam^S123ABC>, and links like <https://example.slack.com/archives/C123/p456>. Never turn them into names or plain text.",
   ].join("\n");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
