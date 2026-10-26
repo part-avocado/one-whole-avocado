@@ -36,6 +36,7 @@ docker compose logs -f
 Send these as a plain message in any channel the bot is in (optionally in a thread):
 
 - `?help` — summary of all commands and features.
+- `?pingadd` / `?pingremove` — add or remove yourself from the `@cutavocados` ping group.
 - `?ping` — Slack API round-trip and event delivery latency.
 - `?info` — host / container / runtime details.
 - `?build` — version, git commit, start time, uptime, Node/Bolt versions, and error count with the last few errors. In Docker the commit comes from `GIT_COMMIT`; run `./deploy.sh` after `git pull` to rebuild with it set (plain `docker compose up --build` shows `unknown`).

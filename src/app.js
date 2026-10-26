@@ -681,15 +681,36 @@ let groupQueue = Promise.resolve();
 const updateGroup = (client, userId, add) => {
   const job = groupQueue.then(async () => {
     const { users } = await client.usergroups.users.list({ usergroup: PING_GROUP_ID });
-    if (users.includes(userId) === add) return;
+    if (users.includes(userId) === add) return false;
     await client.usergroups.users.update({
       usergroup: PING_GROUP_ID,
       users: (add ? [...users, userId] : users.filter((u) => u !== userId)).join(","),
     });
+    return true;
   });
   groupQueue = job.catch(() => {});
   return job;
 };
+
+// ---- ?pingadd / ?pingremove: join or leave the ping group yourself ----
+
+app.message(/^\?ping(add|remove)\s*$/i, async ({ message, context, client, say }) => {
+  if (message.subtype || message.bot_id) return;
+  const thread_ts = message.thread_ts ?? message.ts;
+  const add = context.matches[1].toLowerCase() === "add";
+  let text;
+  try {
+    const changed = await updateGroup(client, message.user, add);
+    text = add
+      ? changed ? S.pingGroup.joined : S.pingGroup.alreadyIn
+      : changed ? S.pingGroup.left : S.pingGroup.alreadyOut;
+  } catch (err) {
+    app.logger.error(err);
+    const code = err.data?.error ?? err.message;
+    text = add ? S.pingGroup.joinFailed(code) : S.pingGroup.leaveFailed(code);
+  }
+  return say({ thread_ts, text });
+});
 
 const buttons = (userId, yes, no) => ({
   type: "actions",

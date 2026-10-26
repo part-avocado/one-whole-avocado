@@ -41,6 +41,8 @@ export const help = [
   `@ \`?digest\` - in a thread, forwards its first message to the other avocado channel as the original poster (members of both <#${REQUEST_CHANNEL}> and n-plus-one-parts-of-an-avocado only)`,
   "@ `?digest full` - same, but forwards the whole thread. digesting a thread again posts into the same copy (full only sends new messages)",
   "@ `?undigest` - in a digested thread or its copy, deletes every copy i made of it (replies from other people stay)",
+  `@ \`?pingadd\` - adds you to @/${PING_GROUP_HANDLE}`,
+  `@ \`?pingremove\` - removes you from @/${PING_GROUP_HANDLE}`,
   "@ `?help` - this message",
   "",
   "*slash commands*:",
@@ -120,6 +122,10 @@ export const pingGroup = {
   leaveButton: "Leave ping group >:(",
   left: `:partavocado-approve: You've been removed from @${PING_GROUP_HANDLE}.`,
   leaveFailed: (code: string) => `:warning: Couldn't remove you from @${PING_GROUP_HANDLE} (\`${code}\`).`,
+  joined: `:partavocado-approve: You've been added to @/${PING_GROUP_HANDLE}!`,
+  alreadyIn: `you're already in @/${PING_GROUP_HANDLE}`,
+  alreadyOut: `you're not in @/${PING_GROUP_HANDLE}`,
+  joinFailed: (code: string) => `:warning: Couldn't add you to @/${PING_GROUP_HANDLE} (\`${code}\`).`,
 };
 
 // ---- deploys ----
