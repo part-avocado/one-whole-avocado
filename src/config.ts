@@ -1,6 +1,8 @@
 export const REQUEST_CHANNEL = "C0C26M2E3FT";
 export const TARGET_CHANNEL = "C0C962U4JSW";
 export const APPROVER = "U0A06EPFV45";
+// Users who get no features or interactions with the bot at all (commands, buttons, joins/leaves, reminders).
+export const BLOCKED_USERS = new Set(["U07SL7Y7M5E"]);
 export const PING_GROUP_ID = "S0C9DFYS90T";
 export const PING_GROUP_HANDLE = "cutavocados";
 export const RULES_URL = "https://hackclub.enterprise.slack.com/docs/T0266FRGM/F0C9ML51CTB";
