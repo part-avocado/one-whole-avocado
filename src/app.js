@@ -18,7 +18,7 @@ import {
 } from "./attest.js";
 import { addReminder, deleteReminder, listReminders, startReminders } from "./reminders.js";
 import { findDigests, forgetDigest, getDigest, recordForwarded, setPosted } from "./digests.js";
-import { REQUEST_CHANNEL, TARGET_CHANNEL, APPROVER, PING_GROUP_ID } from "./config.ts";
+import { REQUEST_CHANNEL, TARGET_CHANNEL, APPROVER, PING_GROUP_ID, BLOCKED_USERS } from "./config.ts";
 import * as S from "./config.ts";
 
 const { App, LogLevel } = bolt;
@@ -31,6 +31,18 @@ const app = new App({
 });
 
 trackErrors(app.logger);
+
+// Blocked users: drop every event, command, action and view submission they trigger.
+// Commands/actions/views are still acked so Slack doesn't show an error, but nothing runs.
+app.use(async ({ body, context, ack, next }) => {
+  const userId =
+    context.userId ?? body?.user?.id ?? body?.user_id ?? body?.event?.user ?? body?.event?.user_id;
+  if (userId && BLOCKED_USERS.has(userId)) {
+    if (typeof ack === "function") await ack();
+    return;
+  }
+  await next();
+});
 
 const escapeMrkdwn = (s) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -668,11 +680,13 @@ app.message(/^\?undigest\s*$/i, async ({ message, client, say }) => {
 
 startReminders(
   ({ channel, thread_ts, user, message }) =>
-    app.client.chat.postMessage({
-      channel,
-      thread_ts,
-      text: S.time.fire(user, escapeKeepLinks(message)),
-    }),
+    BLOCKED_USERS.has(user)
+      ? undefined
+      : app.client.chat.postMessage({
+          channel,
+          thread_ts,
+          text: S.time.fire(user, escapeKeepLinks(message)),
+        }),
   app.logger,
 );
 
